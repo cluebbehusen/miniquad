@@ -161,6 +161,19 @@ fn dispatch_message(payload: &mut IosDisplay, msg: Message) {
                 event_handler.resize_event(width as _, height as _);
             }
         }
+        Message::HardwareKey {
+            keycode,
+            keymods,
+            pressed,
+        } => {
+            payload.state.lock().unwrap().keymods = keymods;
+            let message = if pressed {
+                Message::KeyDown { keycode }
+            } else {
+                Message::KeyUp { keycode }
+            };
+            dispatch_message(payload, message);
+        }
     }
 }
 
@@ -184,6 +197,13 @@ enum Message {
     },
     KeyUp {
         keycode: KeyCode,
+    },
+    /// `keymods` comes from the press's modifier flags, which stay
+    /// correct when a modifier changed while presses went elsewhere.
+    HardwareKey {
+        keycode: KeyCode,
+        keymods: KeyMods,
+        pressed: bool,
     },
     Pause,
     Resume,
@@ -212,6 +232,148 @@ impl MainThreadState {
             _ => {}
         }
     }
+}
+
+const UI_KEY_MODIFIER_SHIFT: usize = 1 << 17;
+const UI_KEY_MODIFIER_CONTROL: usize = 1 << 18;
+const UI_KEY_MODIFIER_ALTERNATE: usize = 1 << 19;
+const UI_KEY_MODIFIER_COMMAND: usize = 1 << 20;
+
+fn keymods_from_modifier_flags(flags: usize) -> KeyMods {
+    KeyMods {
+        shift: flags & UI_KEY_MODIFIER_SHIFT != 0,
+        ctrl: flags & UI_KEY_MODIFIER_CONTROL != 0,
+        alt: flags & UI_KEY_MODIFIER_ALTERNATE != 0,
+        logo: flags & UI_KEY_MODIFIER_COMMAND != 0,
+    }
+}
+
+/// Maps a `UIKey.keyCode`, a USB HID keyboard usage, to a `KeyCode`.
+/// Usages name physical key positions, so like the macOS backend's
+/// virtual key codes they ignore the keyboard layout.
+fn keycode_from_hid_usage(usage: isize) -> Option<KeyCode> {
+    Some(match usage {
+        0x04 => KeyCode::A,
+        0x05 => KeyCode::B,
+        0x06 => KeyCode::C,
+        0x07 => KeyCode::D,
+        0x08 => KeyCode::E,
+        0x09 => KeyCode::F,
+        0x0a => KeyCode::G,
+        0x0b => KeyCode::H,
+        0x0c => KeyCode::I,
+        0x0d => KeyCode::J,
+        0x0e => KeyCode::K,
+        0x0f => KeyCode::L,
+        0x10 => KeyCode::M,
+        0x11 => KeyCode::N,
+        0x12 => KeyCode::O,
+        0x13 => KeyCode::P,
+        0x14 => KeyCode::Q,
+        0x15 => KeyCode::R,
+        0x16 => KeyCode::S,
+        0x17 => KeyCode::T,
+        0x18 => KeyCode::U,
+        0x19 => KeyCode::V,
+        0x1a => KeyCode::W,
+        0x1b => KeyCode::X,
+        0x1c => KeyCode::Y,
+        0x1d => KeyCode::Z,
+        0x1e => KeyCode::Key1,
+        0x1f => KeyCode::Key2,
+        0x20 => KeyCode::Key3,
+        0x21 => KeyCode::Key4,
+        0x22 => KeyCode::Key5,
+        0x23 => KeyCode::Key6,
+        0x24 => KeyCode::Key7,
+        0x25 => KeyCode::Key8,
+        0x26 => KeyCode::Key9,
+        0x27 => KeyCode::Key0,
+        0x28 => KeyCode::Enter,
+        0x29 => KeyCode::Escape,
+        0x2a => KeyCode::Backspace,
+        0x2b => KeyCode::Tab,
+        0x2c => KeyCode::Space,
+        0x2d => KeyCode::Minus,
+        0x2e => KeyCode::Equal,
+        0x2f => KeyCode::LeftBracket,
+        0x30 => KeyCode::RightBracket,
+        0x31 => KeyCode::Backslash,
+        0x32 => KeyCode::World1,
+        0x33 => KeyCode::Semicolon,
+        0x34 => KeyCode::Apostrophe,
+        0x35 => KeyCode::GraveAccent,
+        0x36 => KeyCode::Comma,
+        0x37 => KeyCode::Period,
+        0x38 => KeyCode::Slash,
+        0x39 => KeyCode::CapsLock,
+        0x3a => KeyCode::F1,
+        0x3b => KeyCode::F2,
+        0x3c => KeyCode::F3,
+        0x3d => KeyCode::F4,
+        0x3e => KeyCode::F5,
+        0x3f => KeyCode::F6,
+        0x40 => KeyCode::F7,
+        0x41 => KeyCode::F8,
+        0x42 => KeyCode::F9,
+        0x43 => KeyCode::F10,
+        0x44 => KeyCode::F11,
+        0x45 => KeyCode::F12,
+        0x46 => KeyCode::PrintScreen,
+        0x47 => KeyCode::ScrollLock,
+        0x48 => KeyCode::Pause,
+        0x49 => KeyCode::Insert,
+        0x4a => KeyCode::Home,
+        0x4b => KeyCode::PageUp,
+        0x4c => KeyCode::Delete,
+        0x4d => KeyCode::End,
+        0x4e => KeyCode::PageDown,
+        0x4f => KeyCode::Right,
+        0x50 => KeyCode::Left,
+        0x51 => KeyCode::Down,
+        0x52 => KeyCode::Up,
+        0x53 => KeyCode::NumLock,
+        0x54 => KeyCode::KpDivide,
+        0x55 => KeyCode::KpMultiply,
+        0x56 => KeyCode::KpSubtract,
+        0x57 => KeyCode::KpAdd,
+        0x58 => KeyCode::KpEnter,
+        0x59 => KeyCode::Kp1,
+        0x5a => KeyCode::Kp2,
+        0x5b => KeyCode::Kp3,
+        0x5c => KeyCode::Kp4,
+        0x5d => KeyCode::Kp5,
+        0x5e => KeyCode::Kp6,
+        0x5f => KeyCode::Kp7,
+        0x60 => KeyCode::Kp8,
+        0x61 => KeyCode::Kp9,
+        0x62 => KeyCode::Kp0,
+        0x63 => KeyCode::KpDecimal,
+        0x64 => KeyCode::World2,
+        0x65 => KeyCode::Menu,
+        0x67 => KeyCode::KpEqual,
+        0x68 => KeyCode::F13,
+        0x69 => KeyCode::F14,
+        0x6a => KeyCode::F15,
+        0x6b => KeyCode::F16,
+        0x6c => KeyCode::F17,
+        0x6d => KeyCode::F18,
+        0x6e => KeyCode::F19,
+        0x6f => KeyCode::F20,
+        0x70 => KeyCode::F21,
+        0x71 => KeyCode::F22,
+        0x72 => KeyCode::F23,
+        0x73 => KeyCode::F24,
+        0xe0 => KeyCode::LeftControl,
+        0xe1 => KeyCode::LeftShift,
+        0xe2 => KeyCode::LeftAlt,
+        0xe3 => KeyCode::LeftSuper,
+        0xe4 => KeyCode::RightControl,
+        0xe5 => KeyCode::RightShift,
+        0xe6 => KeyCode::RightAlt,
+        0xe7 => KeyCode::RightSuper,
+        _ => return None,
+    })
 }
 
 fn send_message(message: Message) {
@@ -275,6 +437,71 @@ pub fn define_glk_or_mtk_view(superclass: &Class) -> *const Class {
         on_touch(this, touches, TouchPhase::Cancelled);
     }
 
+    // Sends a key event for each keyboard press and returns the presses
+    // left for `super`, such as Apple TV remote buttons, whose default
+    // handling includes leaving the app.
+    unsafe fn on_presses(presses: ObjcId, pressed: bool) -> ObjcId {
+        let unhandled: ObjcId = msg_send![class!(NSMutableSet), set];
+        let enumerator: ObjcId = msg_send![presses, objectEnumerator];
+        loop {
+            let press: ObjcId = msg_send![enumerator, nextObject];
+            if press.is_null() {
+                break;
+            }
+            let key: ObjcId = msg_send![press, key];
+            let keycode = if key.is_null() {
+                None
+            } else {
+                let usage: isize = msg_send![key, keyCode];
+                keycode_from_hid_usage(usage)
+            };
+            let Some(keycode) = keycode else {
+                let () = msg_send![unhandled, addObject: press];
+                continue;
+            };
+            let flags: usize = msg_send![key, modifierFlags];
+            send_message(Message::HardwareKey {
+                keycode,
+                keymods: keymods_from_modifier_flags(flags),
+                pressed,
+            });
+        }
+        unhandled
+    }
+
+    extern "C" fn presses_began(this: &Object, _: Sel, presses: ObjcId, event: ObjcId) {
+        unsafe {
+            let unhandled = on_presses(presses, true);
+            let count: u64 = msg_send![unhandled, count];
+            if count > 0 {
+                let superclass = apple_util::superclass(this);
+                let () = msg_send![super(this, superclass), pressesBegan: unhandled withEvent: event];
+            }
+        }
+    }
+
+    extern "C" fn presses_ended(this: &Object, _: Sel, presses: ObjcId, event: ObjcId) {
+        unsafe {
+            let unhandled = on_presses(presses, false);
+            let count: u64 = msg_send![unhandled, count];
+            if count > 0 {
+                let superclass = apple_util::superclass(this);
+                let () = msg_send![super(this, superclass), pressesEnded: unhandled withEvent: event];
+            }
+        }
+    }
+
+    extern "C" fn presses_cancelled(this: &Object, _: Sel, presses: ObjcId, event: ObjcId) {
+        unsafe {
+            let unhandled = on_presses(presses, false);
+            let count: u64 = msg_send![unhandled, count];
+            if count > 0 {
+                let superclass = apple_util::superclass(this);
+                let () = msg_send![super(this, superclass), pressesCancelled: unhandled withEvent: event];
+            }
+        }
+    }
+
     unsafe {
         decl.add_method(sel!(isOpaque), yes as extern "C" fn(&Object, Sel) -> BOOL);
         decl.add_method(
@@ -292,6 +519,23 @@ pub fn define_glk_or_mtk_view(superclass: &Class) -> *const Class {
         decl.add_method(
             sel!(touchesCancelled: withEvent:),
             touches_cancelled as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
+        );
+        // Presses go to the first responder.
+        decl.add_method(
+            sel!(canBecomeFirstResponder),
+            yes as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+        decl.add_method(
+            sel!(pressesBegan: withEvent:),
+            presses_began as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
+        );
+        decl.add_method(
+            sel!(pressesEnded: withEvent:),
+            presses_ended as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
+        );
+        decl.add_method(
+            sel!(pressesCancelled: withEvent:),
+            presses_cancelled as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
         );
     }
 
@@ -777,6 +1021,7 @@ pub fn define_app_delegate() -> *const Class {
             msg_send_![window, addSubview: view];
             msg_send_![window, setRootViewController: view_ctrl];
             msg_send_![window, makeKeyAndVisible];
+            msg_send_![view, becomeFirstResponder];
         }
     }
 
@@ -819,6 +1064,13 @@ fn define_textfield_dlg() -> *const Class {
     extern "C" fn keyboard_was_shown(_: &Object, _: Sel, _notif: ObjcId) {}
     extern "C" fn keyboard_will_be_hidden(_: &Object, _: Sel, _notif: ObjcId) {}
     extern "C" fn keyboard_did_change_frame(_: &Object, _: Sel, _notif: ObjcId) {}
+
+    // Resigning leaves no first responder, so hand it back to the view
+    // to keep hardware keyboard presses coming.
+    extern "C" fn text_field_did_end_editing(this: &Object, _: Sel, _textfield: ObjcId) {
+        let payload = get_window_payload(this);
+        unsafe { msg_send_![payload.view, becomeFirstResponder] };
+    }
 
     extern "C" fn should_change_characters_in_range(
         _: &Object,
@@ -885,6 +1137,10 @@ fn define_textfield_dlg() -> *const Class {
         decl.add_method(
             sel!(keyboardDidChangeFrame:),
             keyboard_did_change_frame as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(textFieldDidEndEditing:),
+            text_field_did_end_editing as extern "C" fn(&Object, Sel, ObjcId),
         );
         decl.add_method(
             sel!(textField: shouldChangeCharactersInRange: replacementString:),
