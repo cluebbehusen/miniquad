@@ -333,7 +333,10 @@ unsafe fn get_proc_address(name: *const u8) -> Option<unsafe extern "C" fn()> {
 /// display link keeps ticking cheaply either way.
 fn process_events(payload: &mut IosDisplay) -> bool {
     while let Ok(request) = payload.requests_rx.try_recv() {
-        payload.state.lock().unwrap().process_request(request);
+        match request {
+            crate::native::Request::ShowKeyboard(show) => payload.show_keyboard(show),
+            request => payload.state.lock().unwrap().process_request(request),
+        }
     }
     while let Ok(msg) = payload.messages_rx.try_recv() {
         dispatch_message(payload, msg);
