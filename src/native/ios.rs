@@ -499,8 +499,7 @@ pub fn define_glk_or_mtk_view(superclass: &Class) -> *const Class {
             let count: u64 = msg_send![unhandled, count];
             if count > 0 {
                 let superclass = apple_util::superclass(this);
-                let () =
-                    msg_send![super(this, superclass), pressesCancelled: unhandled withEvent: event];
+                let () = msg_send![super(this, superclass), pressesCancelled: unhandled withEvent: event];
             }
         }
     }
