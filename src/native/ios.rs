@@ -224,11 +224,13 @@ fn send_message(message: Message) {
 pub fn define_glk_or_mtk_view(superclass: &Class) -> *const Class {
     let mut decl = ClassDecl::new("QuadView", superclass).unwrap();
 
-    fn on_touch(this: &Object, event: ObjcId, phase: TouchPhase) {
+    // `touches` holds only the touches this callback is about; the
+    // event's `allTouches` would also report every other live finger
+    // with this phase.
+    fn on_touch(this: &Object, touches: ObjcId, phase: TouchPhase) {
         unsafe {
-            let enumerator: ObjcId = msg_send![event, allTouches];
-            let size: u64 = msg_send![enumerator, count];
-            let enumerator: ObjcId = msg_send![enumerator, objectEnumerator];
+            let size: u64 = msg_send![touches, count];
+            let enumerator: ObjcId = msg_send![touches, objectEnumerator];
 
             for _ in 0..size {
                 let ios_touch: ObjcId = msg_send![enumerator, nextObject];
@@ -257,20 +259,20 @@ pub fn define_glk_or_mtk_view(superclass: &Class) -> *const Class {
             }
         }
     }
-    extern "C" fn touches_began(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
-        on_touch(this, event, TouchPhase::Started);
+    extern "C" fn touches_began(this: &Object, _: Sel, touches: ObjcId, _: ObjcId) {
+        on_touch(this, touches, TouchPhase::Started);
     }
 
-    extern "C" fn touches_moved(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
-        on_touch(this, event, TouchPhase::Moved);
+    extern "C" fn touches_moved(this: &Object, _: Sel, touches: ObjcId, _: ObjcId) {
+        on_touch(this, touches, TouchPhase::Moved);
     }
 
-    extern "C" fn touches_ended(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
-        on_touch(this, event, TouchPhase::Ended);
+    extern "C" fn touches_ended(this: &Object, _: Sel, touches: ObjcId, _: ObjcId) {
+        on_touch(this, touches, TouchPhase::Ended);
     }
 
-    extern "C" fn touches_canceled(this: &Object, _: Sel, _: ObjcId, event: ObjcId) {
-        on_touch(this, event, TouchPhase::Cancelled);
+    extern "C" fn touches_cancelled(this: &Object, _: Sel, touches: ObjcId, _: ObjcId) {
+        on_touch(this, touches, TouchPhase::Cancelled);
     }
 
     unsafe {
@@ -288,8 +290,8 @@ pub fn define_glk_or_mtk_view(superclass: &Class) -> *const Class {
             touches_ended as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
         );
         decl.add_method(
-            sel!(touchesCanceled: withEvent:),
-            touches_canceled as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
+            sel!(touchesCancelled: withEvent:),
+            touches_cancelled as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
         );
     }
 
