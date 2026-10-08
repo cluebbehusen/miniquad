@@ -384,6 +384,25 @@ pub mod window {
         }
     }
 
+    /// Set how many frames per second to aim for, or `None` for the
+    /// display's maximum. The platform may not hit the rate exactly.
+    /// Only works on iOS right now; iPhones also need
+    /// `CADisableMinimumFrameDurationOnPhone` in Info.plist to go above 60.
+    pub fn set_preferred_frame_rate(frames_per_second: Option<u32>) {
+        let d = native_display().lock().unwrap();
+        #[cfg(target_os = "android")]
+        {
+            let _ = frames_per_second;
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            d.native_requests
+                .send(native::Request::SetPreferredFrameRate(frames_per_second))
+                .unwrap();
+        }
+    }
+
     /// Set the position of the IME candidate window.
     /// The position is in window client coordinates (pixels).
     /// This should be called when the text cursor moves to keep the IME
