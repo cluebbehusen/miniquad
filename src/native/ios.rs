@@ -166,13 +166,16 @@ fn dispatch_message(payload: &mut IosDisplay, msg: Message) {
             keymods,
             pressed,
         } => {
+            // UIKit's flags stay set while the other key of a modifier pair
+            // is held, which the soft keyboard's toggling above can't know.
             payload.state.lock().unwrap().keymods = keymods;
-            let message = if pressed {
-                Message::KeyDown { keycode }
-            } else {
-                Message::KeyUp { keycode }
-            };
-            dispatch_message(payload, message);
+            if let Some(ref mut event_handler) = payload.event_handler {
+                if pressed {
+                    event_handler.key_down_event(keycode, keymods, false);
+                } else {
+                    event_handler.key_up_event(keycode, keymods);
+                }
+            }
         }
     }
 }
