@@ -450,6 +450,15 @@ unsafe fn add_pointer_gesture_recognizers(view: ObjcId) {
     let hover: ObjcId = msg_send![hover, initWithTarget: view action: sel!(handlePointerHover:)];
     msg_send_![view, addGestureRecognizer: hover];
 
+    // Pan recognizers took scroll input in iOS 13.4.
+    let can_scroll: BOOL = msg_send![
+        class!(UIPanGestureRecognizer),
+        instancesRespondToSelector: sel!(setAllowedScrollTypesMask:)
+    ];
+    if can_scroll == NO {
+        return;
+    }
+
     // With no allowed touch types the pan recognizer sees only scroll
     // events, so finger drags still reach the view as touches.
     let scroll: ObjcId = msg_send![class!(UIPanGestureRecognizer), alloc];
