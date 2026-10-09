@@ -451,7 +451,13 @@ pub fn define_glk_or_mtk_view(superclass: &Class) -> *const Class {
             if press.is_null() {
                 break;
             }
-            let key: ObjcId = msg_send![press, key];
+            // `UIPress.key` arrived in iOS and tvOS 13.4.
+            let has_key: BOOL = msg_send![press, respondsToSelector: sel!(key)];
+            let key: ObjcId = if has_key == NO {
+                nil
+            } else {
+                msg_send![press, key]
+            };
             let keycode = if key.is_null() {
                 None
             } else {
