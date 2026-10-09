@@ -190,13 +190,16 @@ fn dispatch_message(payload: &mut IosDisplay, msg: Message) {
             keymods,
             pressed,
         } => {
+            // UIKit's flags stay set while the other key of a modifier pair
+            // is held, which the soft keyboard's toggling above can't know.
             payload.state.lock().unwrap().keymods = keymods;
-            let message = if pressed {
-                Message::KeyDown { keycode }
-            } else {
-                Message::KeyUp { keycode }
-            };
-            dispatch_message(payload, message);
+            if let Some(ref mut event_handler) = payload.event_handler {
+                if pressed {
+                    event_handler.key_down_event(keycode, keymods, false);
+                } else {
+                    event_handler.key_up_event(keycode, keymods);
+                }
+            }
         }
     }
 }
@@ -582,7 +585,13 @@ pub fn define_glk_or_mtk_view(superclass: &Class) -> *const Class {
             if press.is_null() {
                 break;
             }
-            let key: ObjcId = msg_send![press, key];
+            // `UIPress.key` arrived in iOS and tvOS 13.4.
+            let has_key: BOOL = msg_send![press, respondsToSelector: sel!(key)];
+            let key: ObjcId = if has_key == NO {
+                nil
+            } else {
+                msg_send![press, key]
+            };
             let keycode = if key.is_null() {
                 None
             } else {
