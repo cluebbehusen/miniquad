@@ -280,6 +280,7 @@ impl MainThreadState {
 }
 
 const UI_TOUCH_TYPE_INDIRECT_POINTER: isize = 3;
+const UI_EVENT_BUTTON_MASK_PRIMARY: isize = 1 << 0;
 const UI_EVENT_BUTTON_MASK_SECONDARY: isize = 1 << 1;
 const UI_EVENT_BUTTON_MASK_BUTTON_3: isize = 1 << 2;
 
@@ -509,8 +510,10 @@ pub fn define_glk_or_mtk_view(superclass: &Class) -> *const Class {
                     MouseButton::Right
                 } else if mask & UI_EVENT_BUTTON_MASK_BUTTON_3 != 0 {
                     MouseButton::Middle
-                } else {
+                } else if mask & UI_EVENT_BUTTON_MASK_PRIMARY != 0 {
                     MouseButton::Left
+                } else {
+                    MouseButton::Unknown
                 };
                 POINTER_BUTTONS.with(|buttons| buttons.borrow_mut().insert(touch_id, button));
                 send_message(Message::MouseButtonDown { button, x, y });
