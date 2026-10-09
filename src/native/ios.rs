@@ -209,13 +209,16 @@ fn dispatch_message(payload: &mut IosDisplay, msg: Message) {
             keymods,
             pressed,
         } => {
+            // UIKit's flags stay set while the other key of a modifier pair
+            // is held, which the soft keyboard's toggling above can't know.
             payload.state.lock().unwrap().keymods = keymods;
-            let message = if pressed {
-                Message::KeyDown { keycode }
-            } else {
-                Message::KeyUp { keycode }
-            };
-            dispatch_message(payload, message);
+            if let Some(ref mut event_handler) = payload.event_handler {
+                if pressed {
+                    event_handler.key_down_event(keycode, keymods, false);
+                } else {
+                    event_handler.key_up_event(keycode, keymods);
+                }
+            }
         }
     }
 }
@@ -296,6 +299,7 @@ impl MainThreadState {
 }
 
 const UI_TOUCH_TYPE_INDIRECT_POINTER: isize = 3;
+const UI_EVENT_BUTTON_MASK_PRIMARY: isize = 1 << 0;
 const UI_EVENT_BUTTON_MASK_SECONDARY: isize = 1 << 1;
 const UI_EVENT_BUTTON_MASK_BUTTON_3: isize = 1 << 2;
 
@@ -465,6 +469,15 @@ unsafe fn add_pointer_gesture_recognizers(view: ObjcId) {
     let hover: ObjcId = msg_send![hover, initWithTarget: view action: sel!(handlePointerHover:)];
     msg_send_![view, addGestureRecognizer: hover];
 
+    // Pan recognizers took scroll input in iOS 13.4.
+    let can_scroll: BOOL = msg_send![
+        class!(UIPanGestureRecognizer),
+        instancesRespondToSelector: sel!(setAllowedScrollTypesMask:)
+    ];
+    if can_scroll == NO {
+        return;
+    }
+
     // With no allowed touch types the pan recognizer sees only scroll
     // events, so finger drags still reach the view as touches.
     let scroll: ObjcId = msg_send![class!(UIPanGestureRecognizer), alloc];
@@ -525,8 +538,10 @@ pub fn define_glk_or_mtk_view(superclass: &Class) -> *const Class {
                     MouseButton::Right
                 } else if mask & UI_EVENT_BUTTON_MASK_BUTTON_3 != 0 {
                     MouseButton::Middle
-                } else {
+                } else if mask & UI_EVENT_BUTTON_MASK_PRIMARY != 0 {
                     MouseButton::Left
+                } else {
+                    MouseButton::Unknown
                 };
                 POINTER_BUTTONS.with(|buttons| buttons.borrow_mut().insert(touch_id, button));
                 send_message(Message::MouseButtonDown { button, x, y });
@@ -601,7 +616,13 @@ pub fn define_glk_or_mtk_view(superclass: &Class) -> *const Class {
             if press.is_null() {
                 break;
             }
-            let key: ObjcId = msg_send![press, key];
+            // `UIPress.key` arrived in iOS and tvOS 13.4.
+            let has_key: BOOL = msg_send![press, respondsToSelector: sel!(key)];
+            let key: ObjcId = if has_key == NO {
+                nil
+            } else {
+                msg_send![press, key]
+            };
             let keycode = if key.is_null() {
                 None
             } else {
