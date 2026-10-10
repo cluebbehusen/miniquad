@@ -368,7 +368,7 @@ pub mod window {
     }
 
     /// Show/hide onscreen keyboard.
-    /// Only works on Android right now.
+    /// Only works on Android and iOS right now.
     pub fn show_keyboard(show: bool) {
         let d = native_display().lock().unwrap();
         #[cfg(target_os = "android")]
