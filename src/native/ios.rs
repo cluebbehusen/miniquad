@@ -5,7 +5,7 @@
 use {
     crate::{
         conf::{self, AppleGfxApi, Conf},
-        event::{EventHandler, KeyCode, KeyMods, TouchPhase},
+        event::{EventHandler, KeyCode, KeyMods, MouseButton, TouchPhase},
         fs,
         native::{
             apple::{
@@ -18,6 +18,7 @@ use {
     },
     std::{
         cell::RefCell,
+        collections::HashMap,
         os::raw::c_void,
         sync::{mpsc, Arc, Mutex},
     },
@@ -31,6 +32,9 @@ use {
 thread_local! {
     static PENDING_SCENE_VIEW_AND_CTRL: RefCell<Option<(ObjcId, ObjcId)>> =
         RefCell::new(None);
+    /// The button each live trackpad or mouse click started with; the
+    /// event's button mask no longer has it when the click ends.
+    static POINTER_BUTTONS: RefCell<HashMap<u64, MouseButton>> = RefCell::new(HashMap::new());
 }
 
 struct MainThreadState {
@@ -161,6 +165,26 @@ fn dispatch_message(payload: &mut IosDisplay, msg: Message) {
                 event_handler.resize_event(width as _, height as _);
             }
         }
+        Message::MouseMotion { x, y } => {
+            if let Some(ref mut event_handler) = payload.event_handler {
+                event_handler.mouse_motion_event(x, y);
+            }
+        }
+        Message::MouseButtonDown { button, x, y } => {
+            if let Some(ref mut event_handler) = payload.event_handler {
+                event_handler.mouse_button_down_event(button, x, y);
+            }
+        }
+        Message::MouseButtonUp { button, x, y } => {
+            if let Some(ref mut event_handler) = payload.event_handler {
+                event_handler.mouse_button_up_event(button, x, y);
+            }
+        }
+        Message::MouseWheel { x, y } => {
+            if let Some(ref mut event_handler) = payload.event_handler {
+                event_handler.mouse_wheel_event(x, y);
+            }
+        }
         Message::HardwareKey {
             keycode,
             keymods,
@@ -189,6 +213,24 @@ enum Message {
     Touch {
         phase: TouchPhase,
         touch_id: u64,
+        x: f32,
+        y: f32,
+    },
+    MouseMotion {
+        x: f32,
+        y: f32,
+    },
+    MouseButtonDown {
+        button: MouseButton,
+        x: f32,
+        y: f32,
+    },
+    MouseButtonUp {
+        button: MouseButton,
+        x: f32,
+        y: f32,
+    },
+    MouseWheel {
         x: f32,
         y: f32,
     },
@@ -236,6 +278,11 @@ impl MainThreadState {
         }
     }
 }
+
+const UI_TOUCH_TYPE_INDIRECT_POINTER: isize = 3;
+const UI_EVENT_BUTTON_MASK_PRIMARY: isize = 1 << 0;
+const UI_EVENT_BUTTON_MASK_SECONDARY: isize = 1 << 1;
+const UI_EVENT_BUTTON_MASK_BUTTON_3: isize = 1 << 2;
 
 const UI_KEY_MODIFIER_SHIFT: usize = 1 << 17;
 const UI_KEY_MODIFIER_CONTROL: usize = 1 << 18;
@@ -379,6 +426,49 @@ fn keycode_from_hid_usage(usage: isize) -> Option<KeyCode> {
     })
 }
 
+/// Converts a point in `view`'s coordinates to the pixels that touch
+/// and mouse events report.
+unsafe fn view_point_to_pixels(view: &Object, point: NSPoint) -> (f32, f32) {
+    let scale: f64 = if native_display().lock().unwrap().high_dpi {
+        let main_screen: ObjcId = msg_send![class!(UIScreen), mainScreen];
+        msg_send![main_screen, scale]
+    } else {
+        msg_send![view, contentScaleFactor]
+    };
+    ((point.x * scale) as f32, (point.y * scale) as f32)
+}
+
+const UI_GESTURE_RECOGNIZER_STATE_BEGAN: isize = 1;
+const UI_GESTURE_RECOGNIZER_STATE_CHANGED: isize = 2;
+const UI_SCROLL_TYPE_MASK_ALL: isize = 0b11;
+
+/// iPadOS reports pointer hover and scrolling only to gesture
+/// recognizers. `UIHoverGestureRecognizer` doesn't exist on tvOS.
+#[cfg(target_os = "ios")]
+unsafe fn add_pointer_gesture_recognizers(view: ObjcId) {
+    let hover: ObjcId = msg_send![class!(UIHoverGestureRecognizer), alloc];
+    let hover: ObjcId = msg_send![hover, initWithTarget: view action: sel!(handlePointerHover:)];
+    msg_send_![view, addGestureRecognizer: hover];
+
+    // Pan recognizers took scroll input in iOS 13.4.
+    let can_scroll: BOOL = msg_send![
+        class!(UIPanGestureRecognizer),
+        instancesRespondToSelector: sel!(setAllowedScrollTypesMask:)
+    ];
+    if can_scroll == NO {
+        return;
+    }
+
+    // With no allowed touch types the pan recognizer sees only scroll
+    // events, so finger drags still reach the view as touches.
+    let scroll: ObjcId = msg_send![class!(UIPanGestureRecognizer), alloc];
+    let scroll: ObjcId = msg_send![scroll, initWithTarget: view action: sel!(handleScroll:)];
+    let no_touch_types: ObjcId = msg_send![class!(NSArray), array];
+    msg_send_![scroll, setAllowedTouchTypes: no_touch_types];
+    msg_send_![scroll, setAllowedScrollTypesMask: UI_SCROLL_TYPE_MASK_ALL];
+    msg_send_![view, addGestureRecognizer: scroll];
+}
+
 fn send_message(message: Message) {
     MESSAGES_TX.with(|tx| {
         let mut tx = tx.borrow_mut();
@@ -392,7 +482,7 @@ pub fn define_glk_or_mtk_view(superclass: &Class) -> *const Class {
     // `touches` holds only the touches this callback is about; the
     // event's `allTouches` would also report every other live finger
     // with this phase.
-    fn on_touch(this: &Object, touches: ObjcId, phase: TouchPhase) {
+    fn on_touch(this: &Object, touches: ObjcId, event: ObjcId, phase: TouchPhase) {
         unsafe {
             let size: u64 = msg_send![touches, count];
             let enumerator: ObjcId = msg_send![touches, objectEnumerator];
@@ -401,43 +491,99 @@ pub fn define_glk_or_mtk_view(superclass: &Class) -> *const Class {
                 let ios_touch: ObjcId = msg_send![enumerator, nextObject];
                 // Use the UITouch pointer as a stable ID instead of loop index
                 let touch_id = ios_touch as u64;
-                let mut ios_pos: NSPoint = msg_send![ios_touch, locationInView: this];
+                let ios_pos: NSPoint = msg_send![ios_touch, locationInView: this];
+                let (x, y) = view_point_to_pixels(this, ios_pos);
 
-                if native_display().lock().unwrap().high_dpi {
-                    let main_screen: ObjcId = msg_send![class!(UIScreen), mainScreen];
-                    let scale: f64 = msg_send![main_screen, scale];
-
-                    ios_pos.x *= scale;
-                    ios_pos.y *= scale;
+                let touch_type: isize = msg_send![ios_touch, type];
+                if touch_type == UI_TOUCH_TYPE_INDIRECT_POINTER {
+                    on_pointer_touch(touch_id, event, phase, x, y);
                 } else {
-                    let content_scale_factor: f64 = msg_send![this, contentScaleFactor];
-                    ios_pos.x *= content_scale_factor;
-                    ios_pos.y *= content_scale_factor;
+                    send_message(Message::Touch {
+                        phase,
+                        touch_id,
+                        x,
+                        y,
+                    });
                 }
-
-                send_message(Message::Touch {
-                    phase,
-                    touch_id,
-                    x: ios_pos.x as f32,
-                    y: ios_pos.y as f32,
-                });
             }
         }
     }
-    extern "C" fn touches_began(this: &Object, _: Sel, touches: ObjcId, _: ObjcId) {
-        on_touch(this, touches, TouchPhase::Started);
+
+    // With `UIApplicationSupportsIndirectInputEvents`, a trackpad or mouse
+    // click arrives as one touch lasting from button press to release.
+    unsafe fn on_pointer_touch(touch_id: u64, event: ObjcId, phase: TouchPhase, x: f32, y: f32) {
+        match phase {
+            TouchPhase::Started => {
+                let mask: isize = msg_send![event, buttonMask];
+                let button = if mask & UI_EVENT_BUTTON_MASK_SECONDARY != 0 {
+                    MouseButton::Right
+                } else if mask & UI_EVENT_BUTTON_MASK_BUTTON_3 != 0 {
+                    MouseButton::Middle
+                } else if mask & UI_EVENT_BUTTON_MASK_PRIMARY != 0 {
+                    MouseButton::Left
+                } else {
+                    MouseButton::Unknown
+                };
+                POINTER_BUTTONS.with(|buttons| buttons.borrow_mut().insert(touch_id, button));
+                send_message(Message::MouseButtonDown { button, x, y });
+            }
+            TouchPhase::Moved => send_message(Message::MouseMotion { x, y }),
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                let button = POINTER_BUTTONS.with(|buttons| buttons.borrow_mut().remove(&touch_id));
+                if let Some(button) = button {
+                    send_message(Message::MouseButtonUp { button, x, y });
+                }
+            }
+        }
     }
 
-    extern "C" fn touches_moved(this: &Object, _: Sel, touches: ObjcId, _: ObjcId) {
-        on_touch(this, touches, TouchPhase::Moved);
+    extern "C" fn touches_began(this: &Object, _: Sel, touches: ObjcId, event: ObjcId) {
+        on_touch(this, touches, event, TouchPhase::Started);
     }
 
-    extern "C" fn touches_ended(this: &Object, _: Sel, touches: ObjcId, _: ObjcId) {
-        on_touch(this, touches, TouchPhase::Ended);
+    extern "C" fn touches_moved(this: &Object, _: Sel, touches: ObjcId, event: ObjcId) {
+        on_touch(this, touches, event, TouchPhase::Moved);
     }
 
-    extern "C" fn touches_cancelled(this: &Object, _: Sel, touches: ObjcId, _: ObjcId) {
-        on_touch(this, touches, TouchPhase::Cancelled);
+    extern "C" fn touches_ended(this: &Object, _: Sel, touches: ObjcId, event: ObjcId) {
+        on_touch(this, touches, event, TouchPhase::Ended);
+    }
+
+    extern "C" fn touches_cancelled(this: &Object, _: Sel, touches: ObjcId, event: ObjcId) {
+        on_touch(this, touches, event, TouchPhase::Cancelled);
+    }
+
+    // Pointer movement with no button held.
+    extern "C" fn handle_pointer_hover(this: &Object, _: Sel, recognizer: ObjcId) {
+        unsafe {
+            let state: isize = msg_send![recognizer, state];
+            if state != UI_GESTURE_RECOGNIZER_STATE_BEGAN
+                && state != UI_GESTURE_RECOGNIZER_STATE_CHANGED
+            {
+                return;
+            }
+            let location: NSPoint = msg_send![recognizer, locationInView: this];
+            let (x, y) = view_point_to_pixels(this, location);
+            send_message(Message::MouseMotion { x, y });
+        }
+    }
+
+    // Trackpad and mouse wheel scrolling, reported in points like the
+    // macOS backend's precise scrolling deltas.
+    extern "C" fn handle_scroll(this: &Object, _: Sel, recognizer: ObjcId) {
+        unsafe {
+            // The translation accumulates over the gesture; resetting it
+            // turns each callback's value into a delta.
+            let translation: NSPoint = msg_send![recognizer, translationInView: this];
+            let zero = NSPoint { x: 0.0, y: 0.0 };
+            let () = msg_send![recognizer, setTranslation: zero inView: this];
+            if translation.x != 0.0 || translation.y != 0.0 {
+                send_message(Message::MouseWheel {
+                    x: translation.x as f32,
+                    y: translation.y as f32,
+                });
+            }
+        }
     }
 
     // Sends a key event for each keyboard press and returns the presses
@@ -530,6 +676,14 @@ pub fn define_glk_or_mtk_view(superclass: &Class) -> *const Class {
         decl.add_method(
             sel!(touchesCancelled: withEvent:),
             touches_cancelled as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
+        );
+        decl.add_method(
+            sel!(handlePointerHover:),
+            handle_pointer_hover as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(handleScroll:),
+            handle_scroll as extern "C" fn(&Object, Sel, ObjcId),
         );
         // Presses go to the first responder.
         decl.add_method(
@@ -883,6 +1037,9 @@ pub fn define_app_delegate() -> *const Class {
                     create_metal_view(screen_rect, conf.sample_count, conf.high_dpi)
                 }
             };
+
+            #[cfg(target_os = "ios")]
+            add_pointer_gesture_recognizers(view.view);
 
             let (textfield_dlg, textfield) = {
                 let textfield_dlg = msg_send_![msg_send_![define_textfield_dlg(), alloc], init];
