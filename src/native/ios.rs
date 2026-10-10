@@ -48,6 +48,8 @@ struct MainThreadState {
 struct IosDisplay {
     view: ObjcId,
     view_ctrl: ObjcId,
+    /// Drives OpenGL draws; nil for Metal, whose MTKView paces itself.
+    display_link: ObjcId,
     _textfield_dlg: ObjcId,
     textfield: ObjcId,
     gfx_api: conf::AppleGfxApi,
@@ -72,6 +74,23 @@ impl IosDisplay {
             } else {
                 msg_send_![self.textfield, resignFirstResponder];
             }
+        }
+    }
+
+    fn set_preferred_frame_rate(&mut self, frames_per_second: Option<u32>) {
+        unsafe {
+            let frames_per_second: isize = match frames_per_second {
+                Some(frames_per_second) => frames_per_second as isize,
+                None => {
+                    let main_screen: ObjcId = msg_send![class!(UIScreen), mainScreen];
+                    msg_send![main_screen, maximumFramesPerSecond]
+                }
+            };
+            let paced = match self.gfx_api {
+                AppleGfxApi::OpenGl => self.display_link,
+                AppleGfxApi::Metal => self.view,
+            };
+            msg_send_![paced, setPreferredFramesPerSecond: frames_per_second];
         }
     }
 
@@ -744,6 +763,9 @@ fn process_events(payload: &mut IosDisplay) -> bool {
     while let Ok(request) = payload.requests_rx.try_recv() {
         match request {
             crate::native::Request::ShowKeyboard(show) => payload.show_keyboard(show),
+            crate::native::Request::SetPreferredFrameRate(frames_per_second) => {
+                payload.set_preferred_frame_rate(frames_per_second)
+            }
             request => payload.state.lock().unwrap().process_request(request),
         }
     }
@@ -1095,9 +1117,22 @@ pub fn define_app_delegate() -> *const Class {
                 },
             }));
 
+            // GLKView has no display link of its own, so OpenGL gets one
+            // at MTKView's default 60 fps.
+            let display_link: ObjcId = if conf.platform.apple_gfx_api == AppleGfxApi::OpenGl {
+                let display_link: ObjcId = msg_send![class!(CADisplayLink),
+                    displayLinkWithTarget: view.view_dlg
+                    selector: sel!(displayLinkFired:)];
+                msg_send_![display_link, setPreferredFramesPerSecond: 60isize];
+                display_link
+            } else {
+                nil
+            };
+
             let payload = Box::new(IosDisplay {
                 view: view.view,
                 view_ctrl: view.view_ctrl,
+                display_link,
                 textfield,
                 _textfield_dlg: textfield_dlg,
                 gfx_api: conf.platform.apple_gfx_api,
@@ -1146,13 +1181,8 @@ pub fn define_app_delegate() -> *const Class {
                 object: nil];
 
             // No background render thread — `CADisplayLink` drives
-            // `drawInMTKView:` directly. GLKView has no display link of
-            // its own, so OpenGL gets one at MTKView's 60 fps.
-            if conf.platform.apple_gfx_api == AppleGfxApi::OpenGl {
-                let display_link: ObjcId = msg_send![class!(CADisplayLink),
-                    displayLinkWithTarget: view.view_dlg
-                    selector: sel!(displayLinkFired:)];
-                msg_send_![display_link, setPreferredFramesPerSecond: 60isize];
+            // `drawInMTKView:` directly, and `displayLinkFired:` for OpenGL.
+            if !display_link.is_null() {
                 let main_run_loop: ObjcId = msg_send![class!(NSRunLoop), mainRunLoop];
                 msg_send_![display_link, addToRunLoop: main_run_loop
                     forMode: NSRunLoopCommonModes];

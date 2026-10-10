@@ -433,6 +433,9 @@ impl X11Display {
                 ShowKeyboard(..) => {
                     eprintln!("Not implemented for X11")
                 }
+                SetPreferredFrameRate(..) => {
+                    // Frame rate control not implemented for X11 yet
+                }
                 SetImePosition { .. } => {
                     // IME position control not implemented for X11 yet
                 }

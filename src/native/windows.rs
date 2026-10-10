@@ -1140,6 +1140,9 @@ impl WindowsDisplay {
                     IME_USER_DISABLED.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }
+            SetPreferredFrameRate(..) => {
+                // Frame rate control not implemented for Windows yet
+            }
             SetImePosition { x, y } => {
                 self.set_ime_position(x, y);
             }

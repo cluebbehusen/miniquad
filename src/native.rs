@@ -76,6 +76,7 @@ pub(crate) enum Request {
     SetWindowPosition { new_x: u32, new_y: u32 },
     SetFullscreen(bool),
     ShowKeyboard(bool),
+    SetPreferredFrameRate(Option<u32>),
     SetImePosition { x: i32, y: i32 },
     SetImeEnabled(bool),
 }
