@@ -545,8 +545,71 @@ impl RenderingBackend for MetalContext {
     ) {
         unimplemented!()
     }
-    fn texture_read_pixels(&mut self, _texture: TextureId, _bytes: &mut [u8]) {
-        unimplemented!()
+    fn texture_read_pixels(&mut self, texture: TextureId, bytes: &mut [u8]) {
+        let texture = self.textures.get(texture);
+        let params = texture.params;
+        assert!(
+            params.sample_count <= 1,
+            "texture_read_pixels not yet implemented for multisampled textures"
+        );
+        // Render targets take the view's pixel format, usually BGRA8,
+        // whatever `params.format` asked for.
+        let raw_format: MTLPixelFormat = unsafe { msg_send![texture.texture, pixelFormat] };
+        let swap_red_blue = match (params.format, raw_format) {
+            (TextureFormat::RGBA8, MTLPixelFormat::RGBA8Unorm) => false,
+            (TextureFormat::RGBA8, MTLPixelFormat::BGRA8Unorm) => true,
+            (TextureFormat::RGBA16F, MTLPixelFormat::RGBA16Float) => false,
+            (format, raw_format) => unimplemented!(
+                "texture_read_pixels for {:?} stored as {:?}",
+                format,
+                raw_format
+            ),
+        };
+        let bytes_per_row = params.format.size(params.width, 1) as usize;
+        let len = bytes_per_row * params.height as usize;
+        assert!(bytes.len() >= len);
+
+        // Render targets live in private storage the CPU can't read, so
+        // copy through a shared buffer. Encoding the copy on the frame's
+        // command buffer orders it after any rendering into the texture.
+        self.really_end_encoder();
+        unsafe {
+            let command_buffer = match self.command_buffer {
+                Some(command_buffer) => command_buffer,
+                None => msg_send![self.command_queue, commandBuffer],
+            };
+            let buffer = msg_send_![self.device, newBufferWithLength: len as u64
+                                    options: MTLResourceOptions::StorageModeShared];
+            let encoder = msg_send_![command_buffer, blitCommandEncoder];
+            msg_send_![encoder, copyFromTexture: texture.texture
+                       sourceSlice: 0u64
+                       sourceLevel: 0u64
+                       sourceOrigin: MTLOrigin { x: 0, y: 0, z: 0 }
+                       sourceSize: MTLSize {
+                           width: params.width as u64,
+                           height: params.height as u64,
+                           depth: 1,
+                       }
+                       toBuffer: buffer
+                       destinationOffset: 0u64
+                       destinationBytesPerRow: bytes_per_row as u64
+                       destinationBytesPerImage: len as u64];
+            msg_send_![encoder, endEncoding];
+            msg_send_![command_buffer, commit];
+            msg_send_![command_buffer, waitUntilCompleted];
+            // `commit_frame` presents with whatever command buffer is
+            // current, so the rest of the frame needs a fresh one.
+            self.command_buffer = Some(msg_send![self.command_queue, commandBuffer]);
+
+            let contents: *const u8 = msg_send![buffer, contents];
+            bytes[..len].copy_from_slice(std::slice::from_raw_parts(contents, len));
+            msg_send_![buffer, release];
+        }
+        if swap_red_blue {
+            for pixel in bytes[..len].chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+        }
     }
     fn texture_generate_mipmaps(&mut self, texture: TextureId) {
         let texture = self.textures.get(texture);
