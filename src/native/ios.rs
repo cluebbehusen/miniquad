@@ -325,72 +325,99 @@ unsafe fn get_proc_address(name: *const u8) -> Option<unsafe extern "C" fn()> {
     Some(unsafe { std::mem::transmute_copy(&symbol) })
 }
 
+/// Drain requests + UIKit-side messages and dispatch them inline, then
+/// report whether this refresh should draw: not while paused and, in
+/// `blocking_event_loop` mode, not until an update is pending. The
+/// display link keeps ticking cheaply either way.
+fn process_events(payload: &mut IosDisplay) -> bool {
+    while let Ok(request) = payload.requests_rx.try_recv() {
+        payload.state.lock().unwrap().process_request(request);
+    }
+    while let Ok(msg) = payload.messages_rx.try_recv() {
+        dispatch_message(payload, msg);
+    }
+
+    let state = payload.state.lock().unwrap();
+    !state.paused && (!payload.blocking_event_loop || state.update_requested)
+}
+
+fn draw_frame(payload: &mut IosDisplay) {
+    // Measure the view, not the device screen — iOS-on-Mac
+    // windowed mode has view < UIScreen.
+    let view_bounds: NSRect = unsafe { msg_send![payload.view, bounds] };
+    let content_scale_factor: f64 = unsafe { msg_send![payload.view, contentScaleFactor] };
+    let screen_width = (view_bounds.size.width * content_scale_factor) as i32;
+    let screen_height = (view_bounds.size.height * content_scale_factor) as i32;
+    let dpi_scale = content_scale_factor as f32;
+
+    let needs_update = {
+        let d = native_display().lock().unwrap();
+        d.screen_width != screen_width
+            || d.screen_height != screen_height
+            || d.dpi_scale != dpi_scale
+    };
+    if needs_update {
+        {
+            let mut d = native_display().lock().unwrap();
+            d.screen_width = screen_width;
+            d.screen_height = screen_height;
+            d.dpi_scale = dpi_scale;
+        }
+        send_message(Message::Resize {
+            width: screen_width,
+            height: screen_height,
+        });
+    }
+
+    if let Some(ref mut event_handler) = payload.event_handler {
+        event_handler.update();
+        event_handler.draw();
+        let mut s = payload.state.lock().unwrap();
+        s.update_requested = false;
+    }
+}
+
 pub fn define_glk_or_mtk_view_dlg(superclass: &Class) -> *const Class {
     let mut decl = ClassDecl::new("QuadViewDlg", superclass).unwrap();
 
-    extern "C" fn draw_in_rect(this: &Object, _: Sel, _: ObjcId, _: ObjcId) {
+    extern "C" fn draw_in_mtk_view(this: &Object, _: Sel, _: ObjcId) {
         let payload = get_window_payload(this);
         if payload.event_handler.is_none() {
             payload.init_event_handler();
         }
-
-        // Drain requests + UIKit-side messages and dispatch inline
-        // before drawing this frame.
-        while let Ok(request) = payload.requests_rx.try_recv() {
-            payload.state.lock().unwrap().process_request(request);
-        }
-        while let Ok(msg) = payload.messages_rx.try_recv() {
-            dispatch_message(payload, msg);
-        }
-
-        // Skip the draw if paused or, in `blocking_event_loop` mode,
-        // if no update is pending. `CADisplayLink` keeps ticking
-        // cheaply.
-        if payload.state.lock().unwrap().paused {
-            return;
-        }
-        if payload.blocking_event_loop && !payload.state.lock().unwrap().update_requested {
-            return;
-        }
-
-        // Measure the view, not the device screen — iOS-on-Mac
-        // windowed mode has view < UIScreen.
-        let view_bounds: NSRect = unsafe { msg_send![payload.view, bounds] };
-        let content_scale_factor: f64 =
-            unsafe { msg_send![payload.view, contentScaleFactor] };
-        let screen_width = (view_bounds.size.width * content_scale_factor) as i32;
-        let screen_height = (view_bounds.size.height * content_scale_factor) as i32;
-        let dpi_scale = content_scale_factor as f32;
-
-        let needs_update = {
-            let d = native_display().lock().unwrap();
-            d.screen_width != screen_width
-                || d.screen_height != screen_height
-                || d.dpi_scale != dpi_scale
-        };
-        if needs_update {
-            {
-                let mut d = native_display().lock().unwrap();
-                d.screen_width = screen_width;
-                d.screen_height = screen_height;
-                d.dpi_scale = dpi_scale;
-            }
-            send_message(Message::Resize {
-                width: screen_width,
-                height: screen_height,
-            });
-        }
-
-        if let Some(ref mut event_handler) = payload.event_handler {
-            event_handler.update();
-            event_handler.draw();
-            let mut s = payload.state.lock().unwrap();
-            s.update_requested = false;
+        if process_events(payload) {
+            draw_frame(payload);
         }
     }
-    // wrapper to make sel! macros happy
-    extern "C" fn draw_in_rect2(this: &Object, s: Sel, o: ObjcId) {
-        draw_in_rect(this, s, o, nil);
+
+    // MTKView runs its own display link; GLKView does not, so OpenGL
+    // registers this with a `CADisplayLink`. Deciding before `display`
+    // keeps a skipped refresh from presenting an undrawn renderbuffer.
+    extern "C" fn display_link_fired(this: &Object, _: Sel, _: ObjcId) {
+        let payload = get_window_payload(this);
+        // Like MTKView, wait until the scene puts the view in a window.
+        let window: ObjcId = unsafe { msg_send![payload.view, window] };
+        if window.is_null() {
+            return;
+        }
+        if payload.event_handler.is_none() || process_events(payload) {
+            unsafe { msg_send_![payload.view, display] };
+        }
+    }
+
+    // `display_link_fired:` has already decided to draw, except for the
+    // first frame: the event handler must be created here, because GLKView
+    // binds its framebuffer only inside `display` and the GL backend
+    // records the bound framebuffer as its default.
+    extern "C" fn glk_view_draw_in_rect(this: &Object, _: Sel, _: ObjcId, _: ObjcId) {
+        let payload = get_window_payload(this);
+        if payload.event_handler.is_none() {
+            payload.init_event_handler();
+            if !process_events(payload) {
+                return;
+            }
+        }
+        draw_frame(payload);
     }
 
     // `MTKViewDelegate` requires this alongside `drawInMTKView:`;
@@ -421,12 +448,17 @@ pub fn define_glk_or_mtk_view_dlg(superclass: &Class) -> *const Class {
     unsafe {
         decl.add_method(
             sel!(glkView: drawInRect:),
-            draw_in_rect as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
+            glk_view_draw_in_rect as extern "C" fn(&Object, Sel, ObjcId, ObjcId),
+        );
+
+        decl.add_method(
+            sel!(displayLinkFired:),
+            display_link_fired as extern "C" fn(&Object, Sel, ObjcId),
         );
 
         decl.add_method(
             sel!(drawInMTKView:),
-            draw_in_rect2 as extern "C" fn(&Object, Sel, ObjcId),
+            draw_in_mtk_view as extern "C" fn(&Object, Sel, ObjcId),
         );
 
         decl.add_method(
@@ -478,7 +510,9 @@ unsafe fn create_opengl_view(screen_rect: NSRect, _sample_count: i32, high_dpi: 
     msg_send_![glk_view_obj, setContext: eagl_context_obj];
 
     msg_send_![glk_view_obj, setDelegate: glk_view_dlg_obj];
-    msg_send_![glk_view_obj, setEnableSetNeedsDisplay: YES];
+    // Draw only from `displayLinkFired:`, which skips refreshes while
+    // paused; UIKit-initiated redraws would bypass that.
+    msg_send_![glk_view_obj, setEnableSetNeedsDisplay: NO];
     msg_send_![glk_view_obj, setUserInteractionEnabled: YES];
     msg_send_![glk_view_obj, setMultipleTouchEnabled: YES];
     if high_dpi {
@@ -695,7 +729,17 @@ pub fn define_app_delegate() -> *const Class {
                 object: nil];
 
             // No background render thread — `CADisplayLink` drives
-            // `drawInMTKView:` directly.
+            // `drawInMTKView:` directly. GLKView has no display link of
+            // its own, so OpenGL gets one at MTKView's 60 fps.
+            if conf.platform.apple_gfx_api == AppleGfxApi::OpenGl {
+                let display_link: ObjcId = msg_send![class!(CADisplayLink),
+                    displayLinkWithTarget: view.view_dlg
+                    selector: sel!(displayLinkFired:)];
+                msg_send_![display_link, setPreferredFramesPerSecond: 60isize];
+                let main_run_loop: ObjcId = msg_send![class!(NSRunLoop), mainRunLoop];
+                msg_send_![display_link, addToRunLoop: main_run_loop
+                    forMode: NSRunLoopCommonModes];
+            }
         }
         YES
     }
