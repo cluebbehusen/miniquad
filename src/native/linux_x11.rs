@@ -436,6 +436,9 @@ impl X11Display {
                 SetPreferredFrameRate(..) => {
                     // Frame rate control not implemented for X11 yet
                 }
+                SetKeyboardType(..) => {
+                    // No onscreen keyboard on X11
+                }
                 SetImePosition { .. } => {
                     // IME position control not implemented for X11 yet
                 }

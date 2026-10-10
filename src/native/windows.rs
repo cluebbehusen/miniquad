@@ -1143,6 +1143,9 @@ impl WindowsDisplay {
             SetPreferredFrameRate(..) => {
                 // Frame rate control not implemented for Windows yet
             }
+            SetKeyboardType(..) => {
+                // Onscreen keyboard layout not implemented for Windows yet
+            }
             SetImePosition { x, y } => {
                 self.set_ime_position(x, y);
             }

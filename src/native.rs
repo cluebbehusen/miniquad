@@ -77,6 +77,7 @@ pub(crate) enum Request {
     SetFullscreen(bool),
     ShowKeyboard(bool),
     SetPreferredFrameRate(Option<u32>),
+    SetKeyboardType(crate::KeyboardType),
     SetImePosition { x: i32, y: i32 },
     SetImeEnabled(bool),
 }

@@ -77,6 +77,22 @@ impl IosDisplay {
         }
     }
 
+    fn set_keyboard_type(&mut self, keyboard_type: crate::KeyboardType) {
+        // UIKeyboardType values.
+        let keyboard_type: isize = match keyboard_type {
+            crate::KeyboardType::Default => 0,
+            crate::KeyboardType::NumbersAndPunctuation => 2,
+        };
+        unsafe {
+            msg_send_![self.textfield, setKeyboardType: keyboard_type];
+            // A keyboard already on screen keeps its layout until reloaded.
+            let showing: BOOL = msg_send![self.textfield, isFirstResponder];
+            if showing == YES {
+                msg_send_![self.textfield, reloadInputViews];
+            }
+        }
+    }
+
     fn set_preferred_frame_rate(&mut self, frames_per_second: Option<u32>) {
         unsafe {
             let frames_per_second: isize = match frames_per_second {
@@ -765,6 +781,9 @@ fn process_events(payload: &mut IosDisplay) -> bool {
             crate::native::Request::ShowKeyboard(show) => payload.show_keyboard(show),
             crate::native::Request::SetPreferredFrameRate(frames_per_second) => {
                 payload.set_preferred_frame_rate(frames_per_second)
+            }
+            crate::native::Request::SetKeyboardType(keyboard_type) => {
+                payload.set_keyboard_type(keyboard_type)
             }
             request => payload.state.lock().unwrap().process_request(request),
         }
