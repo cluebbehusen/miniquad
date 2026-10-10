@@ -384,6 +384,24 @@ pub mod window {
         }
     }
 
+    /// Choose the layout the onscreen keyboard opens with, such as a
+    /// numeric page for an address field. Takes effect at once if the
+    /// keyboard is already up. Only works on iOS right now.
+    pub fn set_keyboard_type(keyboard_type: KeyboardType) {
+        let d = native_display().lock().unwrap();
+        #[cfg(target_os = "android")]
+        {
+            let _ = keyboard_type;
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            d.native_requests
+                .send(native::Request::SetKeyboardType(keyboard_type))
+                .unwrap();
+        }
+    }
+
     /// Set how many frames per second to aim for, or `None` for the
     /// display's maximum. The platform may not hit the rate exactly.
     /// Only works on iOS right now; iPhones also need
@@ -459,6 +477,16 @@ pub mod window {
         let d = native_display().lock().unwrap();
         d.view_ctrl
     }
+}
+
+/// The layout an onscreen keyboard opens with.
+#[derive(Debug, Copy, Clone, PartialEq, Hash, Eq)]
+pub enum KeyboardType {
+    /// The platform's standard text keyboard.
+    Default,
+    /// Opens on numbers and punctuation, with letters one switch away:
+    /// suits addresses and other mostly-numeric text.
+    NumbersAndPunctuation,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Hash, Eq)]

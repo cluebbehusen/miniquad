@@ -265,6 +265,9 @@ impl MacosDisplay {
             SetPreferredFrameRate(..) => {
                 // Frame rate control not implemented for macOS yet
             }
+            SetKeyboardType(..) => {
+                // Not applicable on macOS desktop
+            }
             SetImePosition { .. } => {
                 // IME position control not implemented for macOS yet
             }
