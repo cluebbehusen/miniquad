@@ -82,8 +82,10 @@ struct HeldKey {
     next: Instant,
 }
 
-fn is_modifier(keycode: KeyCode) -> bool {
-    matches!(
+/// Whether a held key repeats. Modifiers and locking keys don't, and
+/// pressing or releasing one changes what a held key types.
+fn repeats(keycode: KeyCode) -> bool {
+    !matches!(
         keycode,
         KeyCode::LeftShift
             | KeyCode::RightShift
@@ -94,6 +96,8 @@ fn is_modifier(keycode: KeyCode) -> bool {
             | KeyCode::LeftSuper
             | KeyCode::RightSuper
             | KeyCode::CapsLock
+            | KeyCode::NumLock
+            | KeyCode::ScrollLock
     )
 }
 
@@ -281,14 +285,16 @@ fn dispatch_message(payload: &mut IosDisplay, msg: Message) {
             // is held, which the soft keyboard's toggling above can't know.
             payload.state.lock().unwrap().keymods = keymods;
             let character = character.and_then(char::from_u32);
-            if pressed && !is_modifier(keycode) {
+            if !repeats(keycode) {
+                payload.held = None;
+            } else if pressed {
                 payload.held = Some(HeldKey {
                     keycode,
                     keymods,
                     character,
                     next: Instant::now() + KEY_REPEAT_DELAY,
                 });
-            } else if !pressed && payload.held.is_some_and(|held| held.keycode == keycode) {
+            } else if payload.held.is_some_and(|held| held.keycode == keycode) {
                 payload.held = None;
             }
             if let Some(ref mut event_handler) = payload.event_handler {
