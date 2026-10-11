@@ -21,6 +21,7 @@ use {
         collections::HashMap,
         os::raw::c_void,
         sync::{mpsc, Arc, Mutex},
+        time::{Duration, Instant},
     },
 };
 
@@ -64,6 +65,36 @@ struct IosDisplay {
     /// cadence as `messages_rx`.
     requests_rx: mpsc::Receiver<crate::native::Request>,
     blocking_event_loop: bool,
+    held: Option<HeldKey>,
+}
+
+/// UIKit sends no repeats for raw key presses, so a held key repeats on
+/// iPadOS's default Key Repeat schedule; apps can't read the user's.
+const KEY_REPEAT_DELAY: Duration = Duration::from_millis(400);
+const KEY_REPEAT_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The hardware key repeating while held.
+#[derive(Clone, Copy)]
+struct HeldKey {
+    keycode: KeyCode,
+    keymods: KeyMods,
+    character: Option<char>,
+    next: Instant,
+}
+
+fn is_modifier(keycode: KeyCode) -> bool {
+    matches!(
+        keycode,
+        KeyCode::LeftShift
+            | KeyCode::RightShift
+            | KeyCode::LeftControl
+            | KeyCode::RightControl
+            | KeyCode::LeftAlt
+            | KeyCode::RightAlt
+            | KeyCode::LeftSuper
+            | KeyCode::RightSuper
+            | KeyCode::CapsLock
+    )
 }
 
 impl IosDisplay {
@@ -110,6 +141,24 @@ impl IosDisplay {
         }
     }
 
+    fn repeat_held_key(&mut self) {
+        let Some(held) = self.held.as_mut() else {
+            return;
+        };
+        let now = Instant::now();
+        if now < held.next {
+            return;
+        }
+        held.next = now + KEY_REPEAT_INTERVAL;
+        let held = *held;
+        if let Some(ref mut event_handler) = self.event_handler {
+            event_handler.key_down_event(held.keycode, held.keymods, true);
+            if let Some(character) = held.character {
+                event_handler.char_event(character, held.keymods, true);
+            }
+        }
+    }
+
     fn init_event_handler(&mut self) {
         let f = self.f.take().unwrap();
 
@@ -138,6 +187,8 @@ fn get_window_payload(this: &Object) -> &mut IosDisplay {
 fn dispatch_message(payload: &mut IosDisplay, msg: Message) {
     match msg {
         Message::Pause => {
+            // Keys released while the app is away send no release.
+            payload.held = None;
             payload.state.lock().unwrap().paused = true;
         }
         Message::Resume => {
@@ -224,13 +275,28 @@ fn dispatch_message(payload: &mut IosDisplay, msg: Message) {
             keycode,
             keymods,
             pressed,
+            character,
         } => {
             // UIKit's flags stay set while the other key of a modifier pair
             // is held, which the soft keyboard's toggling above can't know.
             payload.state.lock().unwrap().keymods = keymods;
+            let character = character.and_then(char::from_u32);
+            if pressed && !is_modifier(keycode) {
+                payload.held = Some(HeldKey {
+                    keycode,
+                    keymods,
+                    character,
+                    next: Instant::now() + KEY_REPEAT_DELAY,
+                });
+            } else if !pressed && payload.held.is_some_and(|held| held.keycode == keycode) {
+                payload.held = None;
+            }
             if let Some(ref mut event_handler) = payload.event_handler {
                 if pressed {
                     event_handler.key_down_event(keycode, keymods, false);
+                    if let Some(character) = character {
+                        event_handler.char_event(character, keymods, false);
+                    }
                 } else {
                     event_handler.key_up_event(keycode, keymods);
                 }
@@ -284,6 +350,8 @@ enum Message {
         keycode: KeyCode,
         keymods: KeyMods,
         pressed: bool,
+        /// What a press types, if anything.
+        character: Option<u32>,
     },
     Pause,
     Resume,
@@ -621,6 +689,32 @@ pub fn define_glk_or_mtk_view(superclass: &Class) -> *const Class {
         }
     }
 
+    // The character a key press types. UIKit types no hardware presses
+    // into the hidden text field, so a press carries its own character,
+    // as the macOS backend's key events do. Command and Control presses
+    // are shortcuts. Arrow, function, and other special keys spell their
+    // characters as names or private-use code points, so only one
+    // printable character passes.
+    unsafe fn typed_character(key: ObjcId, flags: usize) -> Option<u32> {
+        if flags & (UI_KEY_MODIFIER_COMMAND | UI_KEY_MODIFIER_CONTROL) != 0 {
+            return None;
+        }
+        let characters: ObjcId = msg_send![key, characters];
+        if characters.is_null() {
+            return None;
+        }
+        let len: u64 = msg_send![characters, length];
+        if len != 1 {
+            return None;
+        }
+        let c: u16 = msg_send![characters, characterAtIndex: 0u64];
+        if c >= 32 && c != 127 && !(0xD800..=0xF8FF).contains(&c) {
+            Some(u32::from(c))
+        } else {
+            None
+        }
+    }
+
     // Sends a key event for each keyboard press and returns the presses
     // left for `super`, such as Apple TV remote buttons, whose default
     // handling includes leaving the app.
@@ -650,10 +744,16 @@ pub fn define_glk_or_mtk_view(superclass: &Class) -> *const Class {
                 continue;
             };
             let flags: usize = msg_send![key, modifierFlags];
+            let character = if pressed {
+                typed_character(key, flags)
+            } else {
+                None
+            };
             send_message(Message::HardwareKey {
                 keycode,
                 keymods: keymods_from_modifier_flags(flags),
                 pressed,
+                character,
             });
         }
         unhandled
@@ -791,6 +891,7 @@ fn process_events(payload: &mut IosDisplay) -> bool {
     while let Ok(msg) = payload.messages_rx.try_recv() {
         dispatch_message(payload, msg);
     }
+    payload.repeat_held_key();
 
     let state = payload.state.lock().unwrap();
     !state.paused && (!payload.blocking_event_loop || state.update_requested)
@@ -1163,6 +1264,7 @@ pub fn define_app_delegate() -> *const Class {
                 messages_rx: rx,
                 requests_rx,
                 blocking_event_loop: conf.platform.blocking_event_loop,
+                held: None,
             });
             let payload_ptr = Box::into_raw(payload) as *mut std::ffi::c_void;
 
