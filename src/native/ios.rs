@@ -687,6 +687,11 @@ pub fn define_glk_or_mtk_view(superclass: &Class) -> *const Class {
             let zero = NSPoint { x: 0.0, y: 0.0 };
             let () = msg_send![recognizer, setTranslation: zero inView: this];
             if translation.x != 0.0 || translation.y != 0.0 {
+                // A scroll can arrive before any hover has reported where
+                // the pointer is, so report its location first.
+                let location: NSPoint = msg_send![recognizer, locationInView: this];
+                let (x, y) = view_point_to_pixels(this, location);
+                send_message(Message::MouseMotion { x, y });
                 send_message(Message::MouseWheel {
                     x: translation.x as f32,
                     y: translation.y as f32,
