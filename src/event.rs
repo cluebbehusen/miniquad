@@ -211,12 +211,15 @@ pub trait EventHandler {
     /// Right now is only implemented on Android, Windows, OSX, X11 and wasm,
     /// On Andoid window_minimized_event is called on a Pause ndk callback
     /// On X11, OSX, Windows and wasm it will be called on focus change events.
+    /// On iOS it is called when the app resigns active, and one more frame is
+    /// drawn before drawing pauses.
     fn window_minimized_event(&mut self) {}
 
     /// Window has been restored
     /// Right now is only implemented on Android, X11 and wasm,
     /// On Andoid window_restored_event is called on a Resume ndk callback
     /// On X11 and wasm it will be called on focus change events.
+    /// On iOS it is called when the app becomes active again.
     fn window_restored_event(&mut self) {}
 
     /// This event is sent when the userclicks the window's close button

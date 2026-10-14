@@ -17,7 +17,7 @@ use {
         native_display,
     },
     std::{
-        cell::RefCell,
+        cell::{Cell, RefCell},
         collections::HashMap,
         os::raw::c_void,
         sync::{mpsc, Arc, Mutex},
@@ -33,6 +33,8 @@ use {
 thread_local! {
     static PENDING_SCENE_VIEW_AND_CTRL: RefCell<Option<(ObjcId, ObjcId)>> =
         RefCell::new(None);
+    /// The view `scene_will_connect` put in a window; nil until then.
+    static SCENE_VIEW: Cell<ObjcId> = Cell::new(nil);
     /// The button each live trackpad or mouse click started with; the
     /// event's button mask no longer has it when the click ends.
     static POINTER_BUTTONS: RefCell<HashMap<u64, MouseButton>> = RefCell::new(HashMap::new());
@@ -41,6 +43,9 @@ thread_local! {
 struct MainThreadState {
     quit: bool,
     paused: bool,
+    /// The app is going inactive: draw one more frame so the handler can
+    /// act on `window_minimized_event`, then pause.
+    pausing: bool,
     update_requested: bool,
     view: *mut Object,
     keymods: KeyMods,
@@ -193,10 +198,27 @@ fn dispatch_message(payload: &mut IosDisplay, msg: Message) {
         Message::Pause => {
             // Keys released while the app is away send no release.
             payload.held = None;
-            payload.state.lock().unwrap().paused = true;
+            let mut state = payload.state.lock().unwrap();
+            if state.paused || state.pausing {
+                return;
+            }
+            state.pausing = true;
+            drop(state);
+            if let Some(ref mut event_handler) = payload.event_handler {
+                event_handler.window_minimized_event();
+            }
         }
         Message::Resume => {
-            payload.state.lock().unwrap().paused = false;
+            let mut state = payload.state.lock().unwrap();
+            let away = state.paused || state.pausing;
+            state.paused = false;
+            state.pausing = false;
+            drop(state);
+            if away {
+                if let Some(ref mut event_handler) = payload.event_handler {
+                    event_handler.window_restored_event();
+                }
+            }
         }
         Message::Destroy => {
             payload.state.lock().unwrap().quit = true;
@@ -905,7 +927,7 @@ fn process_events(payload: &mut IosDisplay) -> bool {
     payload.repeat_held_key();
 
     let state = payload.state.lock().unwrap();
-    !state.paused && (!payload.blocking_event_loop || state.update_requested)
+    !state.paused && (state.pausing || !payload.blocking_event_loop || state.update_requested)
 }
 
 fn draw_frame(payload: &mut IosDisplay) {
@@ -941,6 +963,11 @@ fn draw_frame(payload: &mut IosDisplay) {
         event_handler.draw();
         let mut s = payload.state.lock().unwrap();
         s.update_requested = false;
+    }
+    let mut s = payload.state.lock().unwrap();
+    if s.pausing {
+        s.pausing = false;
+        s.paused = true;
     }
 }
 
@@ -1238,6 +1265,7 @@ pub fn define_app_delegate() -> *const Class {
             let state_original = Arc::new(Mutex::new(MainThreadState {
                 quit: false,
                 paused: true,
+                pausing: false,
                 update_requested: true,
                 view: view.view,
                 keymods: KeyMods {
@@ -1312,6 +1340,17 @@ pub fn define_app_delegate() -> *const Class {
                 name: scene_did_activate_name
                 object: nil];
 
+            // A scene going inactive (the app switcher, Home, a call) may be
+            // followed by suspension and termination without another
+            // callback, so the handler hears of it while it can still run.
+            let scene_will_deactivate_name =
+                apple_util::str_to_nsstring("UISceneWillDeactivateNotification");
+            let _: () = msg_send![notification_center,
+                addObserver: delegate_self
+                selector: sel!(sceneWillDeactivate:)
+                name: scene_will_deactivate_name
+                object: nil];
+
             // No background render thread — `CADisplayLink` drives
             // `drawInMTKView:` directly, and `displayLinkFired:` for OpenGL.
             if !display_link.is_null() {
@@ -1328,7 +1367,48 @@ pub fn define_app_delegate() -> *const Class {
     }
 
     extern "C" fn application_will_resign_active(_: &Object, _: Sel, _: ObjcId) {
+        deactivate();
+    }
+
+    /// Whether `notification` concerns the scene showing the view, since
+    /// scene notifications arrive for every scene of the app.
+    fn shows_view(notification: ObjcId) -> bool {
+        let view = SCENE_VIEW.with(Cell::get);
+        if view.is_null() {
+            return false;
+        }
+        unsafe {
+            let scene: ObjcId = msg_send![notification, object];
+            let window: ObjcId = msg_send![view, window];
+            if window.is_null() {
+                return false;
+            }
+            let own: ObjcId = msg_send![window, windowScene];
+            own == scene
+        }
+    }
+
+    /// Pauses, delivering `window_minimized_event` and drawing the final
+    /// frame before returning: once the app resigns active, no further
+    /// display refresh is guaranteed before the system suspends it.
+    fn deactivate() {
         send_message(Message::Pause);
+        let view = SCENE_VIEW.with(Cell::get);
+        if view.is_null() {
+            return;
+        }
+        let payload = get_window_payload(unsafe { &*view });
+        // Without a handler there is nothing to run; the next refresh
+        // creates it, draws, and pauses.
+        if payload.event_handler.is_none() || !process_events(payload) {
+            return;
+        }
+        unsafe {
+            match payload.gfx_api {
+                AppleGfxApi::OpenGl => msg_send_![view, display],
+                AppleGfxApi::Metal => msg_send_![view, draw],
+            };
+        }
     }
 
     extern "C" fn scene_will_connect(_: &Object, _: Sel, notification: ObjcId) {
@@ -1352,11 +1432,20 @@ pub fn define_app_delegate() -> *const Class {
             msg_send_![window, setRootViewController: view_ctrl];
             msg_send_![window, makeKeyAndVisible];
             msg_send_![view, becomeFirstResponder];
+            SCENE_VIEW.with(|cell| cell.set(view));
         }
     }
 
-    extern "C" fn scene_did_activate(_: &Object, _: Sel, _: ObjcId) {
-        send_message(Message::Resume);
+    extern "C" fn scene_did_activate(_: &Object, _: Sel, notification: ObjcId) {
+        if shows_view(notification) {
+            send_message(Message::Resume);
+        }
+    }
+
+    extern "C" fn scene_will_deactivate(_: &Object, _: Sel, notification: ObjcId) {
+        if shows_view(notification) {
+            deactivate();
+        }
     }
 
     unsafe {
@@ -1380,6 +1469,10 @@ pub fn define_app_delegate() -> *const Class {
         decl.add_method(
             sel!(sceneDidActivate:),
             scene_did_activate as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(sceneWillDeactivate:),
+            scene_will_deactivate as extern "C" fn(&Object, Sel, ObjcId),
         );
     }
     decl.register()
