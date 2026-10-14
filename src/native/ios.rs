@@ -41,6 +41,9 @@ thread_local! {
 struct MainThreadState {
     quit: bool,
     paused: bool,
+    /// The app is going inactive: draw one more frame so the handler can
+    /// act on `window_minimized_event`, then pause.
+    pausing: bool,
     update_requested: bool,
     view: *mut Object,
     keymods: KeyMods,
@@ -193,10 +196,27 @@ fn dispatch_message(payload: &mut IosDisplay, msg: Message) {
         Message::Pause => {
             // Keys released while the app is away send no release.
             payload.held = None;
-            payload.state.lock().unwrap().paused = true;
+            let mut state = payload.state.lock().unwrap();
+            if state.paused || state.pausing {
+                return;
+            }
+            state.pausing = true;
+            drop(state);
+            if let Some(ref mut event_handler) = payload.event_handler {
+                event_handler.window_minimized_event();
+            }
         }
         Message::Resume => {
-            payload.state.lock().unwrap().paused = false;
+            let mut state = payload.state.lock().unwrap();
+            let away = state.paused || state.pausing;
+            state.paused = false;
+            state.pausing = false;
+            drop(state);
+            if away {
+                if let Some(ref mut event_handler) = payload.event_handler {
+                    event_handler.window_restored_event();
+                }
+            }
         }
         Message::Destroy => {
             payload.state.lock().unwrap().quit = true;
@@ -905,7 +925,7 @@ fn process_events(payload: &mut IosDisplay) -> bool {
     payload.repeat_held_key();
 
     let state = payload.state.lock().unwrap();
-    !state.paused && (!payload.blocking_event_loop || state.update_requested)
+    !state.paused && (state.pausing || !payload.blocking_event_loop || state.update_requested)
 }
 
 fn draw_frame(payload: &mut IosDisplay) {
@@ -941,6 +961,11 @@ fn draw_frame(payload: &mut IosDisplay) {
         event_handler.draw();
         let mut s = payload.state.lock().unwrap();
         s.update_requested = false;
+    }
+    let mut s = payload.state.lock().unwrap();
+    if s.pausing {
+        s.pausing = false;
+        s.paused = true;
     }
 }
 
@@ -1238,6 +1263,7 @@ pub fn define_app_delegate() -> *const Class {
             let state_original = Arc::new(Mutex::new(MainThreadState {
                 quit: false,
                 paused: true,
+                pausing: false,
                 update_requested: true,
                 view: view.view,
                 keymods: KeyMods {
@@ -1312,6 +1338,17 @@ pub fn define_app_delegate() -> *const Class {
                 name: scene_did_activate_name
                 object: nil];
 
+            // A scene going inactive (the app switcher, Home, a call) may be
+            // followed by suspension and termination without another
+            // callback, so the handler hears of it while it can still run.
+            let scene_will_deactivate_name =
+                apple_util::str_to_nsstring("UISceneWillDeactivateNotification");
+            let _: () = msg_send![notification_center,
+                addObserver: delegate_self
+                selector: sel!(sceneWillDeactivate:)
+                name: scene_will_deactivate_name
+                object: nil];
+
             // No background render thread — `CADisplayLink` drives
             // `drawInMTKView:` directly, and `displayLinkFired:` for OpenGL.
             if !display_link.is_null() {
@@ -1359,6 +1396,10 @@ pub fn define_app_delegate() -> *const Class {
         send_message(Message::Resume);
     }
 
+    extern "C" fn scene_will_deactivate(_: &Object, _: Sel, _: ObjcId) {
+        send_message(Message::Pause);
+    }
+
     unsafe {
         decl.add_method(
             sel!(application: didFinishLaunchingWithOptions:),
@@ -1380,6 +1421,10 @@ pub fn define_app_delegate() -> *const Class {
         decl.add_method(
             sel!(sceneDidActivate:),
             scene_did_activate as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(sceneWillDeactivate:),
+            scene_will_deactivate as extern "C" fn(&Object, Sel, ObjcId),
         );
     }
     decl.register()
