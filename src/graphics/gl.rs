@@ -25,6 +25,7 @@ pub mod raw_gl {
 struct Buffer {
     gl_buf: GLuint,
     buffer_type: BufferType,
+    usage: BufferUsage,
     size: usize,
     // Dimension of the indices for this buffer,
     // used only as a type argument for glDrawElements and can be
@@ -1376,6 +1377,7 @@ impl RenderingBackend for GlContext {
         let buffer = Buffer {
             gl_buf,
             buffer_type: type_,
+            usage,
             size,
             index_type,
         };
@@ -1404,7 +1406,15 @@ impl RenderingBackend for GlContext {
         self.cache.store_buffer_binding(gl_target);
         self.cache
             .bind_buffer(gl_target, buffer.gl_buf, buffer.index_type);
-        unsafe { glBufferSubData(gl_target, 0, size as _, data.ptr as _) };
+        unsafe {
+            // New storage spares the driver from waiting for the GPU to finish
+            // with contents queued earlier in the frame.
+            if buffer.usage == BufferUsage::Stream {
+                glBufferData(gl_target, size as _, data.ptr as _, gl_usage(&buffer.usage));
+            } else {
+                glBufferSubData(gl_target, 0, size as _, data.ptr as _);
+            }
+        }
         self.cache.restore_buffer_binding(gl_target);
     }
 

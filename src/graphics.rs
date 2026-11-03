@@ -1280,6 +1280,8 @@ pub trait RenderingBackend {
     /// ```
     fn new_buffer(&mut self, type_: BufferType, usage: BufferUsage, data: BufferSource)
         -> BufferId;
+    /// Writes `data` at the start of `buffer`. Whatever a [`BufferUsage::Stream`]
+    /// buffer held past the new data is undefined afterwards.
     fn buffer_update(&mut self, buffer: BufferId, data: BufferSource);
 
     /// Size of buffer in bytes.
