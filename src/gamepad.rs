@@ -71,7 +71,8 @@ pub enum Button {
     DpadDown,
     DpadLeft,
     DpadRight,
-    /// Menu on Xbox, Options on PlayStation, + on Switch.
+    /// Menu on Xbox, Options on PlayStation, + on Switch. Needs iOS and
+    /// tvOS 13 or macOS 10.15; older systems report it missing.
     Menu,
     /// View on Xbox, Share or Create on PlayStation, − on Switch.
     Options,
@@ -113,7 +114,8 @@ pub enum MicroButton {
     Select,
     PlayPause,
     /// Back on the Siri Remote. UIKit receives the press too, and by
-    /// default returns to the Home screen.
+    /// default returns to the Home screen. Needs iOS and tvOS 13 or
+    /// macOS 10.15; older systems report it missing.
     Menu,
 }
 
@@ -162,7 +164,8 @@ impl Gamepad {
     }
 
     /// Whether this gamepad has the button. Stick clicks, Options and
-    /// Home can be missing; every gamepad has the rest.
+    /// Home can be missing, and Menu before iOS and tvOS 13 or macOS
+    /// 10.15; every gamepad has the rest.
     pub fn has(&self, button: Button) -> bool {
         self.present & button.bit() != 0
     }
