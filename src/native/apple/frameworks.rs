@@ -95,6 +95,9 @@ extern "C" {
     pub fn NSLog(fmt: ObjcId, ...);
 }
 
+#[link(name = "GameController", kind = "framework")]
+extern "C" {}
+
 #[link(name = "ImageIO", kind = "framework")]
 extern "C" {
     pub static kUTTypePNG: ObjcId;
