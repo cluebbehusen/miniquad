@@ -181,6 +181,13 @@ pub struct Platform {
     /// Whether to automatically setup the panic hook for Android.
     /// Set this to false if your app does its own panic_hook setup to avoid conflicts.
     pub android_panic_hook: bool,
+
+    /// If `true`, iOS holds back its own swipes from the top edge of the
+    /// screen (Notification Center and Control Center) until a second
+    /// swipe, so touches that start near the top edge reach the app
+    /// instead of being cancelled. Suits apps with controls along the top.
+    /// Ignored on tvOS, which has no such swipes. Defaults to `false`.
+    pub ios_defer_top_edge_gestures: bool,
 }
 
 impl Default for Platform {
@@ -197,6 +204,7 @@ impl Default for Platform {
             wayland_decorations: WaylandDecorations::default(),
             linux_wm_class: "miniquad-application",
             android_panic_hook: true,
+            ios_defer_top_edge_gestures: false,
         }
     }
 }
