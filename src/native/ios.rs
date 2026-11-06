@@ -1075,6 +1075,7 @@ struct View {
 }
 
 /// `UIRectEdgeTop`.
+#[cfg(target_os = "ios")]
 const UI_RECT_EDGE_TOP: u64 = 1;
 
 /// The root view controller. It answers which screen edges hold back
@@ -1245,9 +1246,13 @@ pub fn define_app_delegate() -> *const Class {
             #[cfg(target_os = "ios")]
             add_pointer_gesture_recognizers(view.view);
 
+            #[cfg(target_os = "ios")]
             if conf.platform.ios_defer_top_edge_gestures {
                 (*view.view_ctrl).set_ivar::<u64>("deferred_edges", UI_RECT_EDGE_TOP);
-                msg_send_![view.view_ctrl, setNeedsUpdateOfScreenEdgesDeferringSystemGestures];
+                msg_send_![
+                    view.view_ctrl,
+                    setNeedsUpdateOfScreenEdgesDeferringSystemGestures
+                ];
             }
 
             let (textfield_dlg, textfield) = {

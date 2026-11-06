@@ -186,7 +186,7 @@ pub struct Platform {
     /// screen (Notification Center and Control Center) until a second
     /// swipe, so touches that start near the top edge reach the app
     /// instead of being cancelled. Suits apps with controls along the top.
-    /// Defaults to `false`.
+    /// Ignored on tvOS, which has no such swipes. Defaults to `false`.
     pub ios_defer_top_edge_gestures: bool,
 }
 
