@@ -10,6 +10,8 @@
 pub mod conf;
 mod event;
 pub mod fs;
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+pub mod gamepad;
 pub mod graphics;
 pub mod native;
 use std::collections::HashMap;
