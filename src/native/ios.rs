@@ -1074,6 +1074,30 @@ struct View {
     _gles2: bool,
 }
 
+/// `UIRectEdgeTop`.
+const UI_RECT_EDGE_TOP: u64 = 1;
+
+/// The root view controller. It answers which screen edges hold back
+/// their system gestures from its `deferred_edges` ivar, a `UIRectEdge`
+/// mask that starts empty, as a plain `UIViewController` would.
+pub fn define_view_ctrl() -> *const Class {
+    let mut decl = ClassDecl::new("QuadViewController", class!(UIViewController)).unwrap();
+
+    extern "C" fn preferred_screen_edges_deferring_system_gestures(this: &Object, _: Sel) -> u64 {
+        unsafe { *this.get_ivar("deferred_edges") }
+    }
+
+    unsafe {
+        decl.add_method(
+            sel!(preferredScreenEdgesDeferringSystemGestures),
+            preferred_screen_edges_deferring_system_gestures as extern "C" fn(&Object, Sel) -> u64,
+        );
+    }
+
+    decl.add_ivar::<u64>("deferred_edges");
+    decl.register()
+}
+
 unsafe fn create_opengl_view(screen_rect: NSRect, _sample_count: i32, high_dpi: bool) -> View {
     let glk_view_obj: ObjcId = msg_send![define_glk_or_mtk_view(class!(GLKView)), alloc];
     let glk_view_obj: ObjcId = msg_send![glk_view_obj, initWithFrame: screen_rect];
@@ -1118,7 +1142,7 @@ unsafe fn create_opengl_view(screen_rect: NSRect, _sample_count: i32, high_dpi: 
         msg_send_![glk_view_obj, setContentScaleFactor: 1.0];
     }
 
-    let view_ctrl_obj: ObjcId = msg_send![class!(UIViewController), alloc];
+    let view_ctrl_obj: ObjcId = msg_send![define_view_ctrl(), alloc];
     let view_ctrl_obj: ObjcId = msg_send![view_ctrl_obj, init];
 
     msg_send_![view_ctrl_obj, setView: glk_view_obj];
@@ -1138,7 +1162,7 @@ unsafe fn create_metal_view(screen_rect: NSRect, sample_count: i32, _high_dpi: b
     let mtk_view_dlg_obj: ObjcId = msg_send![define_glk_or_mtk_view_dlg(class!(NSObject)), alloc];
     let mtk_view_dlg_obj: ObjcId = msg_send![mtk_view_dlg_obj, init];
 
-    let view_ctrl_obj: ObjcId = msg_send![class!(UIViewController), alloc];
+    let view_ctrl_obj: ObjcId = msg_send![define_view_ctrl(), alloc];
     let view_ctrl_obj: ObjcId = msg_send![view_ctrl_obj, init];
 
     msg_send_![view_ctrl_obj, setView: mtk_view_obj];
@@ -1220,6 +1244,11 @@ pub fn define_app_delegate() -> *const Class {
 
             #[cfg(target_os = "ios")]
             add_pointer_gesture_recognizers(view.view);
+
+            if conf.platform.ios_defer_top_edge_gestures {
+                (*view.view_ctrl).set_ivar::<u64>("deferred_edges", UI_RECT_EDGE_TOP);
+                msg_send_![view.view_ctrl, setNeedsUpdateOfScreenEdgesDeferringSystemGestures];
+            }
 
             let (textfield_dlg, textfield) = {
                 let textfield_dlg = msg_send_![msg_send_![define_textfield_dlg(), alloc], init];
