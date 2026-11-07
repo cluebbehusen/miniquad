@@ -120,7 +120,7 @@ extern "C" {
     pub static NSPasteboardTypeFileURL: ObjcId;
 }
 
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "tvos"))]
 #[link(name = "GLKit", kind = "framework")]
 extern "C" {}
 

@@ -1133,6 +1133,7 @@ unsafe fn create_opengl_view(screen_rect: NSRect, _sample_count: i32, high_dpi: 
     // paused; UIKit-initiated redraws would bypass that.
     msg_send_![glk_view_obj, setEnableSetNeedsDisplay: NO];
     msg_send_![glk_view_obj, setUserInteractionEnabled: YES];
+    #[cfg(target_os = "ios")]
     msg_send_![glk_view_obj, setMultipleTouchEnabled: YES];
     if high_dpi {
         let main_screen: ObjcId = msg_send![class!(UIScreen), mainScreen];
