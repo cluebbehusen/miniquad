@@ -80,6 +80,10 @@ pub(crate) enum Request {
     SetKeyboardType(crate::KeyboardType),
     SetImePosition { x: i32, y: i32 },
     SetImeEnabled(bool),
+    #[cfg(target_os = "tvos")]
+    SetSystemReceivesPresses(bool),
+    #[cfg(target_os = "tvos")]
+    SetKeyboardText(String),
 }
 
 pub trait Clipboard: Send + Sync {

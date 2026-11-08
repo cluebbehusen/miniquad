@@ -68,6 +68,7 @@ impl Drop for RcObjcId {
 #[link(name = "System")]
 extern "C" {
     pub static _NSConcreteStackBlock: [*const c_void; 32];
+    pub static _NSConcreteGlobalBlock: [*const c_void; 32];
     pub static _NSConcreteBogusBlock: [*const c_void; 32];
 }
 
@@ -96,7 +97,12 @@ extern "C" {
 }
 
 #[link(name = "GameController", kind = "framework")]
-extern "C" {}
+extern "C" {
+    #[cfg(target_os = "tvos")]
+    pub static GCInputDirectionalCardinalDpad: ObjcId;
+    #[cfg(target_os = "tvos")]
+    pub static GCInputDirectionalCenterButton: ObjcId;
+}
 
 #[link(name = "ImageIO", kind = "framework")]
 extern "C" {

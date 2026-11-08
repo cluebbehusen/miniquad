@@ -404,6 +404,20 @@ pub mod window {
         }
     }
 
+    /// Set the line of text the onscreen keyboard shows. tvOS's keyboard
+    /// fills the screen, hiding the app's own field, and shows this instead;
+    /// keep it up to date while the keyboard is open. Does nothing off tvOS.
+    #[cfg_attr(not(target_os = "tvos"), allow(unused_variables))]
+    pub fn set_keyboard_text(text: &str) {
+        #[cfg(target_os = "tvos")]
+        native_display()
+            .lock()
+            .unwrap()
+            .native_requests
+            .send(native::Request::SetKeyboardText(text.to_owned()))
+            .unwrap();
+    }
+
     /// Set how many frames per second to aim for, or `None` for the
     /// display's maximum. The platform may not hit the rate exactly.
     /// Only works on iOS right now; iPhones also need
