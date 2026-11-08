@@ -3,13 +3,19 @@
 //!
 //! Call [`controllers`] once a frame from `update` or `draw`. It returns
 //! each connected controller's state at that moment, so a press that
-//! starts and ends between two calls is not seen, and nothing is read
-//! while the app draws no frames. A controller keeps its
-//! [`ControllerId`] while it stays connected: compare ids with the
-//! previous frame's to see controllers connect and disconnect.
+//! starts and ends between two calls is not seen, apart from a micro
+//! gamepad's [`MicroButton`]s, and nothing is read while the app draws no
+//! frames. A controller keeps its [`ControllerId`] while it
+//! stays connected: compare ids with the previous frame's to see
+//! controllers connect and disconnect.
 //!
 //! Full gamepads and micro gamepads, such as the Siri Remote, arrive in
 //! separate lists.
+//!
+//! On tvOS, controller presses stay away from UIKit until
+//! [`set_system_receives_presses`] lets them through. While the system
+//! keyboard is up its presses are the keyboard's: controllers read as
+//! untouched then, and until a press that outlives the keyboard is let go.
 
 use crate::native::apple::game_controller;
 
@@ -107,26 +113,42 @@ impl Button {
     }
 }
 
-/// A button on a micro gamepad, named as on the Siri Remote.
+/// A button on a micro gamepad, named as on the Siri Remote. tvOS can make a
+/// press too short to poll, so one between two reads still reads as pressed
+/// once.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum MicroButton {
-    /// Clicking the touch surface.
+    /// Pressing anywhere on the touch surface, whichever part of it.
     Select,
     PlayPause,
-    /// Back on the Siri Remote. UIKit receives the press too, and by
-    /// default returns to the Home screen. Needs iOS and tvOS 13 or
-    /// macOS 10.15; older systems report it missing.
+    /// Back on the Siri Remote. Needs iOS and tvOS 13 or macOS 10.15; older
+    /// systems report it missing.
     Menu,
+    /// Pressing the center of a remote that can tell it from the ring around
+    /// it, such as the inner ring of the 2021 Siri Remote. Only tvOS reports
+    /// this; a remote that can't tell reports it missing.
+    Center,
+    /// Pressing the top of the ring around [`MicroButton::Center`]. Reported
+    /// the same way, as are the other three directions.
+    Up,
+    Down,
+    Left,
+    Right,
 }
 
 impl MicroButton {
-    pub const ALL: [MicroButton; 3] = [
+    pub const ALL: [MicroButton; 8] = [
         MicroButton::Select,
         MicroButton::PlayPause,
         MicroButton::Menu,
+        MicroButton::Center,
+        MicroButton::Up,
+        MicroButton::Down,
+        MicroButton::Left,
+        MicroButton::Right,
     ];
 
-    fn bit(self) -> u8 {
+    pub(crate) const fn bit(self) -> u8 {
         1 << self as u8
     }
 }
@@ -185,8 +207,9 @@ pub struct MicroGamepad {
     pub id: ControllerId,
     /// The name the system gives the controller, such as "Siri Remote".
     pub name: Option<String>,
-    /// The touch position, measured from where the touch began; zero
-    /// while nothing touches the surface.
+    /// Where the touch is on the surface, from -1 to 1 across it; zero
+    /// while nothing touches it. Measure a swipe from where the touch
+    /// began, since a touch can begin anywhere.
     pub touch: Direction,
     pub(crate) pressed: u8,
     pub(crate) present: u8,
@@ -222,4 +245,21 @@ pub struct Controllers {
 /// `update` and `draw` run.
 pub fn controllers() -> Controllers {
     game_controller::read()
+}
+
+/// Whether UIKit also receives controller presses. It starts off, so
+/// presses reach only [`controllers`]. On, the system acts on them: Back
+/// on the Siri Remote returns to the Home screen, which tvOS expects from
+/// an app's top screen. The system keyboard gets them while it is up
+/// whatever this says. Takes effect on the next frame. Does nothing off
+/// tvOS.
+#[cfg_attr(not(target_os = "tvos"), allow(unused_variables))]
+pub fn set_system_receives_presses(receives: bool) {
+    #[cfg(target_os = "tvos")]
+    crate::native_display()
+        .lock()
+        .unwrap()
+        .native_requests
+        .send(crate::native::Request::SetSystemReceivesPresses(receives))
+        .unwrap();
 }

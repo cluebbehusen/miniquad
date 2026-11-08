@@ -106,6 +106,30 @@ fn repeats(keycode: KeyCode) -> bool {
     )
 }
 
+#[cfg(target_os = "tvos")]
+use crate::native::apple::game_controller;
+
+#[cfg(target_os = "tvos")]
+thread_local! {
+    /// What `gamepad::set_system_receives_presses` last asked for.
+    static SYSTEM_RECEIVES_PRESSES: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Lets controller presses reach UIKit where the app asked or the system
+/// keyboard, which reads only those, is up.
+#[cfg(target_os = "tvos")]
+fn update_controller_interaction(view_ctrl: ObjcId) {
+    let requested = SYSTEM_RECEIVES_PRESSES.with(Cell::get);
+    let receives: BOOL = if requested || game_controller::keyboard_up() {
+        YES
+    } else {
+        NO
+    };
+    unsafe {
+        msg_send_![view_ctrl, setControllerUserInteractionEnabled: receives];
+    }
+}
+
 impl IosDisplay {
     fn show_keyboard(&mut self, show: bool) {
         unsafe {
@@ -115,6 +139,19 @@ impl IosDisplay {
                 msg_send_![self.textfield, resignFirstResponder];
             }
         }
+    }
+
+    #[cfg(target_os = "tvos")]
+    fn set_keyboard_text(&mut self, text: &str) {
+        unsafe {
+            msg_send_![self.textfield, setText: apple_util::str_to_nsstring(text)];
+        }
+    }
+
+    #[cfg(target_os = "tvos")]
+    fn set_system_receives_presses(&mut self, receives: bool) {
+        SYSTEM_RECEIVES_PRESSES.with(|requested| requested.set(receives));
+        update_controller_interaction(self.view_ctrl);
     }
 
     fn set_keyboard_type(&mut self, keyboard_type: crate::KeyboardType) {
@@ -614,6 +651,11 @@ pub fn define_glk_or_mtk_view(superclass: &Class) -> *const Class {
     // event's `allTouches` would also report every other live finger
     // with this phase.
     fn on_touch(this: &Object, touches: ObjcId, event: ObjcId, phase: TouchPhase) {
+        // tvOS has no touchscreen. Its touches are the remote's surface, which
+        // `gamepad` reports, so passing them on would act on one swipe twice.
+        if cfg!(target_os = "tvos") {
+            return;
+        }
         unsafe {
             let size: u64 = msg_send![touches, count];
             let enumerator: ObjcId = msg_send![touches, objectEnumerator];
@@ -918,6 +960,12 @@ fn process_events(payload: &mut IosDisplay) -> bool {
             crate::native::Request::SetKeyboardType(keyboard_type) => {
                 payload.set_keyboard_type(keyboard_type)
             }
+            #[cfg(target_os = "tvos")]
+            crate::native::Request::SetSystemReceivesPresses(receives) => {
+                payload.set_system_receives_presses(receives)
+            }
+            #[cfg(target_os = "tvos")]
+            crate::native::Request::SetKeyboardText(text) => payload.set_keyboard_text(&text),
             request => payload.state.lock().unwrap().process_request(request),
         }
     }
@@ -1080,9 +1128,15 @@ const UI_RECT_EDGE_TOP: u64 = 1;
 
 /// The root view controller. It answers which screen edges hold back
 /// their system gestures from its `deferred_edges` ivar, a `UIRectEdge`
-/// mask that starts empty, as a plain `UIViewController` would.
+/// mask that starts empty, as a plain `UIViewController` would. On tvOS
+/// it is a `GCEventViewController`, which keeps controller presses from
+/// UIKit, where Back would leave the app from every screen.
 pub fn define_view_ctrl() -> *const Class {
-    let mut decl = ClassDecl::new("QuadViewController", class!(UIViewController)).unwrap();
+    #[cfg(target_os = "tvos")]
+    let superclass = class!(GCEventViewController);
+    #[cfg(not(target_os = "tvos"))]
+    let superclass = class!(UIViewController);
+    let mut decl = ClassDecl::new("QuadViewController", superclass).unwrap();
 
     extern "C" fn preferred_screen_edges_deferring_system_gestures(this: &Object, _: Sel) -> u64 {
         unsafe { *this.get_ivar("deferred_edges") }
@@ -1528,6 +1582,18 @@ fn define_textfield_dlg() -> *const Class {
     extern "C" fn text_field_did_end_editing(this: &Object, _: Sel, _textfield: ObjcId) {
         let payload = get_window_payload(this);
         unsafe { msg_send_![payload.view, becomeFirstResponder] };
+        #[cfg(target_os = "tvos")]
+        {
+            game_controller::set_keyboard_up(false);
+            update_controller_interaction(payload.view_ctrl);
+        }
+    }
+
+    #[cfg(target_os = "tvos")]
+    extern "C" fn text_field_did_begin_editing(this: &Object, _: Sel, _textfield: ObjcId) {
+        let payload = get_window_payload(this);
+        game_controller::set_keyboard_up(true);
+        update_controller_interaction(payload.view_ctrl);
     }
 
     extern "C" fn should_change_characters_in_range(
@@ -1549,6 +1615,8 @@ fn define_textfield_dlg() -> *const Class {
                                 character: c as u32,
                             })
                         }
+                        // tvOS's Done only closes its keyboard.
+                        #[cfg(not(target_os = "tvos"))]
                         10 => {
                             send_message(Message::KeyDown {
                                 keycode: crate::event::KeyCode::Enter,
@@ -1599,6 +1667,11 @@ fn define_textfield_dlg() -> *const Class {
         decl.add_method(
             sel!(textFieldDidEndEditing:),
             text_field_did_end_editing as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        #[cfg(target_os = "tvos")]
+        decl.add_method(
+            sel!(textFieldDidBeginEditing:),
+            text_field_did_begin_editing as extern "C" fn(&Object, Sel, ObjcId),
         );
         decl.add_method(
             sel!(textField: shouldChangeCharactersInRange: replacementString:),
