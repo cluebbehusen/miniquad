@@ -46,6 +46,7 @@ pub struct MacosDisplay {
     native_requests: Receiver<Request>,
     update_requested: bool,
     last_paint_start_time: Instant,
+    blocking_event_loop: bool,
     frame_pacer: Option<FramePacer>,
     frame_interval: u32,
 }
@@ -245,6 +246,22 @@ impl MacosDisplay {
         }
     }
 
+    /// Paces frames with the display the window is on, creating the
+    /// display link if there is none yet. A link made for one display
+    /// keeps that display's timing until it is moved.
+    fn follow_display(&mut self) {
+        if self.blocking_event_loop {
+            return;
+        }
+        let Some(display_id) = window_display_id(self.window) else {
+            return;
+        };
+        match self.frame_pacer.as_ref() {
+            Some(frame_pacer) => frame_pacer.set_display(display_id),
+            None => self.frame_pacer = FramePacer::new(display_id),
+        }
+    }
+
     fn process_request(&mut self, request: Request) {
         use Request::*;
         match request {
@@ -426,9 +443,7 @@ pub fn define_cocoa_window_delegate() -> *const Class {
 
     extern "C" fn window_did_change_screen(this: &Object, _: Sel, _: ObjcId) {
         let payload = get_window_payload(this);
-        if let Some(frame_pacer) = payload.frame_pacer.as_ref() {
-            frame_pacer.follow_window(payload.window);
-        }
+        payload.follow_display();
         if let Some((w, h)) = unsafe { payload.update_dimensions() } {
             if let Some(event_handler) = payload.context() {
                 event_handler.resize_event(w as _, h as _);
@@ -1137,11 +1152,28 @@ struct FramePacer {
     last: u64,
 }
 
+/// The display `window` is on, if it is on one.
+fn window_display_id(window: ObjcId) -> Option<u32> {
+    unsafe {
+        let screen: ObjcId = msg_send![window, screen];
+        if screen.is_null() {
+            return None;
+        }
+        let description: ObjcId = msg_send![screen, deviceDescription];
+        let number: ObjcId =
+            msg_send![description, objectForKey: str_to_nsstring("NSScreenNumber")];
+        if number.is_null() {
+            return None;
+        }
+        Some(msg_send![number, unsignedIntValue])
+    }
+}
+
 impl FramePacer {
-    fn new(window: ObjcId) -> Option<Self> {
+    fn new(display_id: u32) -> Option<Self> {
         unsafe {
             let mut display_link: CVDisplayLinkRef = std::ptr::null_mut();
-            if CVDisplayLinkCreateWithActiveCGDisplays(&mut display_link as *mut _) != 0
+            if CVDisplayLinkCreateWithCGDisplay(display_id, &mut display_link as *mut _) != 0
                 || display_link.is_null()
             {
                 return None;
@@ -1168,7 +1200,6 @@ impl FramePacer {
                 frame_signal,
                 last: 0,
             };
-            pacer.follow_window(window);
 
             if CVDisplayLinkStart(display_link) != 0 {
                 return None;
@@ -1178,21 +1209,8 @@ impl FramePacer {
         }
     }
 
-    /// Moves the link onto the display `window` is on. A link created for
-    /// the active displays otherwise keeps the first display's timing.
-    fn follow_window(&self, window: ObjcId) {
+    fn set_display(&self, display_id: u32) {
         unsafe {
-            let screen: ObjcId = msg_send![window, screen];
-            if screen.is_null() {
-                return;
-            }
-            let description: ObjcId = msg_send![screen, deviceDescription];
-            let number: ObjcId =
-                msg_send![description, objectForKey: str_to_nsstring("NSScreenNumber")];
-            if number.is_null() {
-                return;
-            }
-            let display_id: u32 = msg_send![number, unsignedIntValue];
             let _ = CVDisplayLinkSetCurrentCGDisplay(self.display_link, display_id);
         }
     }
@@ -1369,6 +1387,10 @@ unsafe fn perform_redraw(
     }
 }
 
+/// How often to retry creating the display link while there is none, as
+/// when the window was on no display.
+const PACER_RETRY: Duration = Duration::from_secs(1);
+
 pub unsafe fn run<F>(conf: crate::conf::Conf, f: F)
 where
     F: 'static + FnOnce() -> Box<dyn EventHandler>,
@@ -1399,6 +1421,7 @@ where
         modifiers: Modifiers::default(),
         update_requested: true,
         last_paint_start_time: Instant::now(),
+        blocking_event_loop: conf.platform.blocking_event_loop,
         frame_pacer: None,
         frame_interval: 1,
     };
@@ -1525,15 +1548,21 @@ where
     // Basically reimplementing msg_send![ns_app, run] here
     let distant_future: ObjcId = msg_send![class!(NSDate), distantFuture];
     let distant_past: ObjcId = msg_send![class!(NSDate), distantPast];
-    if !conf.platform.blocking_event_loop {
-        display.frame_pacer = FramePacer::new(window);
-    }
+    display.follow_display();
+    let mut next_pacer_attempt = Instant::now() + PACER_RETRY;
     let mut done = false;
     while !(done || crate::native_display().lock().unwrap().quit_ordered) {
 
         // Wait at the top for just in time rendering
-        if let Some(frame_pacer) = display.frame_pacer.as_mut() {
-            frame_pacer.wait_next_frame(display.frame_interval, Duration::from_millis(50));
+        match display.frame_pacer.as_mut() {
+            Some(frame_pacer) => {
+                frame_pacer.wait_next_frame(display.frame_interval, Duration::from_millis(50))
+            }
+            None if Instant::now() >= next_pacer_attempt => {
+                display.follow_display();
+                next_pacer_attempt = Instant::now() + PACER_RETRY;
+            }
+            None => {}
         }
 
         while let Ok(request) = display.native_requests.try_recv() {

@@ -317,6 +317,10 @@ pub const kCVTimeIsIndefinite: i32 = 1 << 0;
 #[link(name = "CoreVideo", kind = "framework")]
 extern "C" {
     pub fn CVDisplayLinkCreateWithActiveCGDisplays(display_link_out: *mut CVDisplayLinkRef) -> i32;
+    pub fn CVDisplayLinkCreateWithCGDisplay(
+        display_id: u32,
+        display_link_out: *mut CVDisplayLinkRef,
+    ) -> i32;
     pub fn CVDisplayLinkSetOutputCallback(
         display_link: CVDisplayLinkRef,
         callback: CVDisplayLinkOutputCallback,
