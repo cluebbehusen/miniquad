@@ -56,6 +56,15 @@ struct IosDisplay {
     view_ctrl: ObjcId,
     /// Drives OpenGL draws; nil for Metal, whose MTKView paces itself.
     display_link: ObjcId,
+    /// The target `display_link` calls.
+    link_target: ObjcId,
+    /// The window scene or screen `display_link` follows, retained; nil
+    /// for the link made at launch, before the view has a window.
+    link_owner: ObjcId,
+    /// Whether window scenes make display links that follow the scene
+    /// between displays (iOS and tvOS 27); before that, links come from a
+    /// screen and are remade when the scene moves.
+    scene_links: bool,
     _textfield_dlg: ObjcId,
     textfield: ObjcId,
     gfx_api: conf::AppleGfxApi,
@@ -178,17 +187,76 @@ impl IosDisplay {
         self.apply_pacing();
     }
 
-    /// Re-reads the maximum of the screen showing the view, which changes
-    /// when the window moves to another screen or a TV switches modes,
-    /// and re-paces on a change.
+    /// Follows the screen showing the view, whose maximum changes when the
+    /// window moves to another screen or a TV switches modes, and re-paces
+    /// on a change.
     fn follow_screen(&mut self) {
-        let max_fps = max_frames_per_second(self.view);
-        if max_fps == self.max_fps {
+        let (scene, screen) = view_scene_and_screen(self.view);
+        let relinked = self.follow_with_display_link(scene, screen);
+        let max_fps: isize = unsafe { msg_send![screen, maximumFramesPerSecond] };
+        if max_fps != self.max_fps {
+            self.max_fps = max_fps;
+            native_display().lock().unwrap().refresh_rate = (max_fps > 0).then_some(max_fps as f64);
+        } else if !relinked {
             return;
         }
-        self.max_fps = max_fps;
-        native_display().lock().unwrap().refresh_rate = (max_fps > 0).then_some(max_fps as f64);
         self.apply_pacing();
+    }
+
+    /// Moves OpenGL's display link onto the display showing the view, since
+    /// a link ticks with the display of the scene or screen that made it.
+    /// Returns whether it made a new link.
+    fn follow_with_display_link(&mut self, scene: ObjcId, screen: ObjcId) -> bool {
+        if self.gfx_api != AppleGfxApi::OpenGl || scene.is_null() {
+            return false;
+        }
+        let owner = if self.scene_links { scene } else { screen };
+        if owner == self.link_owner || !self.replace_display_link(owner) {
+            return false;
+        }
+        self.set_link_owner(owner);
+        true
+    }
+
+    /// A link made by a screen stops with that screen, so when it
+    /// disconnects, tick with the main screen until the scene reports the
+    /// screen it moved to.
+    fn screen_disconnected(&mut self, screen: ObjcId) {
+        if self.gfx_api != AppleGfxApi::OpenGl || screen != self.link_owner {
+            return;
+        }
+        let main_screen: ObjcId = unsafe { msg_send![class!(UIScreen), mainScreen] };
+        if self.replace_display_link(main_screen) {
+            self.apply_pacing();
+        }
+    }
+
+    /// Replaces the display link with one made by `source`, a window scene
+    /// or a screen, scheduled like the one it replaces.
+    fn replace_display_link(&mut self, source: ObjcId) -> bool {
+        unsafe {
+            let link: ObjcId = msg_send![source,
+                displayLinkWithTarget: self.link_target
+                selector: sel!(displayLinkFired:)];
+            if link.is_null() {
+                return false;
+            }
+            msg_send_![self.display_link, invalidate];
+            let main_run_loop: ObjcId = msg_send![class!(NSRunLoop), mainRunLoop];
+            msg_send_![link, addToRunLoop: main_run_loop forMode: NSRunLoopCommonModes];
+            self.display_link = link;
+        }
+        true
+    }
+
+    fn set_link_owner(&mut self, owner: ObjcId) {
+        unsafe {
+            let owner: ObjcId = msg_send![owner, retain];
+            if !self.link_owner.is_null() {
+                msg_send_![self.link_owner, release];
+            }
+            self.link_owner = owner;
+        }
     }
 
     fn apply_pacing(&self) {
@@ -246,14 +314,15 @@ impl IosDisplay {
     }
 }
 
-/// The most frames per second the screen showing `view` can display: the
-/// window scene's screen, or the main screen before the view has a window.
-fn max_frames_per_second(view: ObjcId) -> isize {
+/// The window scene showing `view`, nil before the view has a window, and
+/// that scene's screen, or the main screen before then.
+fn view_scene_and_screen(view: ObjcId) -> (ObjcId, ObjcId) {
     unsafe {
         let window: ObjcId = msg_send![view, window];
+        let mut scene = nil;
         let mut screen = nil;
         if !window.is_null() {
-            let scene: ObjcId = msg_send![window, windowScene];
+            scene = msg_send![window, windowScene];
             if !scene.is_null() {
                 screen = msg_send![scene, screen];
             }
@@ -261,7 +330,7 @@ fn max_frames_per_second(view: ObjcId) -> isize {
         if screen.is_null() {
             screen = msg_send![class!(UIScreen), mainScreen];
         }
-        msg_send![screen, maximumFramesPerSecond]
+        (scene, screen)
     }
 }
 
@@ -1420,10 +1489,15 @@ pub fn define_app_delegate() -> *const Class {
                 nil
             };
 
+            let scene_links: BOOL = msg_send![class!(UIWindowScene),
+                instancesRespondToSelector: sel!(displayLinkWithTarget:selector:)];
             let mut payload = Box::new(IosDisplay {
                 view: view.view,
                 view_ctrl: view.view_ctrl,
                 display_link,
+                link_target: view.view_dlg,
+                link_owner: nil,
+                scene_links: scene_links == YES,
                 textfield,
                 _textfield_dlg: textfield_dlg,
                 gfx_api: conf.platform.apple_gfx_api,
@@ -1484,6 +1558,14 @@ pub fn define_app_delegate() -> *const Class {
                 addObserver: delegate_self
                 selector: sel!(sceneWillDeactivate:)
                 name: scene_will_deactivate_name
+                object: nil];
+
+            let screen_did_disconnect_name =
+                apple_util::str_to_nsstring("UIScreenDidDisconnectNotification");
+            let _: () = msg_send![notification_center,
+                addObserver: delegate_self
+                selector: sel!(screenDidDisconnect:)
+                name: screen_did_disconnect_name
                 object: nil];
 
             // No background render thread — `CADisplayLink` drives
@@ -1583,6 +1665,15 @@ pub fn define_app_delegate() -> *const Class {
         }
     }
 
+    extern "C" fn screen_did_disconnect(_: &Object, _: Sel, notification: ObjcId) {
+        let view = SCENE_VIEW.with(Cell::get);
+        if view.is_null() {
+            return;
+        }
+        let screen: ObjcId = unsafe { msg_send![notification, object] };
+        get_window_payload(unsafe { &*view }).screen_disconnected(screen);
+    }
+
     unsafe {
         decl.add_method(
             sel!(application: didFinishLaunchingWithOptions:),
@@ -1608,6 +1699,10 @@ pub fn define_app_delegate() -> *const Class {
         decl.add_method(
             sel!(sceneWillDeactivate:),
             scene_will_deactivate as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(screenDidDisconnect:),
+            screen_did_disconnect as extern "C" fn(&Object, Sel, ObjcId),
         );
     }
     decl.register()
