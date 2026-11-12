@@ -10,9 +10,9 @@ use crate::{
 use winapi::{
     shared::{
         hidusage::{HID_USAGE_GENERIC_MOUSE, HID_USAGE_PAGE_GENERIC},
-        minwindef::{DWORD, HIWORD, LOWORD, LPARAM, LRESULT, MAX_PATH, TRUE, UINT, WPARAM},
+        minwindef::{DWORD, HIWORD, LOWORD, LPARAM, LRESULT, MAX_PATH, TRUE, UINT, WORD, WPARAM},
         ntdef::NULL,
-        windef::{HBRUSH, HCURSOR, HDC, HICON, HWND, POINT, RECT},
+        windef::{HBRUSH, HCURSOR, HDC, HICON, HMONITOR, HWND, POINT, RECT},
         windowsx::{GET_X_LPARAM, GET_Y_LPARAM},
     },
     um::{
@@ -118,6 +118,9 @@ pub(crate) struct WindowsDisplay {
     event_handler: Option<Box<dyn EventHandler>>,
     modal_resizing_timer: usize,
     update_requested: bool,
+    swap_interval_ext: Option<wgl::SwapIntervalEXT>,
+    /// The monitor whose refresh rate was last reported.
+    monitor: HMONITOR,
 }
 
 impl WindowsDisplay {
@@ -521,6 +524,10 @@ unsafe extern "system" fn win32_wndproc(
 
         WM_MOVE if payload.cursor_grabbed => {
             update_clip_rect(hwnd);
+        }
+
+        WM_DISPLAYCHANGE => {
+            payload.read_refresh_rate(hwnd);
         }
 
         WM_INPUT => {
@@ -1047,6 +1054,10 @@ impl WindowsDisplay {
     /// and window position from the window's rect.
     /// returns true if size or position has changed
     unsafe fn update_dimensions(&mut self, hwnd: HWND) -> bool {
+        if MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != self.monitor {
+            self.read_refresh_rate(hwnd);
+        }
+
         let mut d = crate::native_display().lock().unwrap();
         let mut rect: RECT = std::mem::zeroed();
 
@@ -1088,6 +1099,13 @@ impl WindowsDisplay {
         }
 
         false
+    }
+
+    /// Reads the refresh rate of the monitor the window is on.
+    unsafe fn read_refresh_rate(&mut self, hwnd: HWND) {
+        self.monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let refresh_rate = monitor_refresh_rate(self.monitor);
+        crate::native_display().lock().unwrap().refresh_rate = refresh_rate;
     }
 
     unsafe fn init_dpi(&mut self, high_dpi: bool) {
@@ -1140,8 +1158,10 @@ impl WindowsDisplay {
                     IME_USER_DISABLED.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }
-            SetFrameInterval(..) => {
-                // Frame pacing not implemented for Windows yet
+            SetFrameInterval(interval) => {
+                if let Some(swap_interval_ext) = self.swap_interval_ext {
+                    swap_interval_ext(interval.min(i32::MAX as u32) as i32);
+                }
             }
             SetKeyboardType(..) => {
                 // Onscreen keyboard layout not implemented for Windows yet
@@ -1154,6 +1174,99 @@ impl WindowsDisplay {
             }
         }
     }
+}
+
+#[link(name = "user32")]
+extern "system" {
+    fn GetDisplayConfigBufferSizes(flags: u32, path_count: *mut u32, mode_count: *mut u32) -> i32;
+    fn QueryDisplayConfig(
+        flags: u32,
+        path_count: *mut u32,
+        paths: *mut DISPLAYCONFIG_PATH_INFO,
+        mode_count: *mut u32,
+        modes: *mut DISPLAYCONFIG_MODE_INFO,
+        topology: *mut DISPLAYCONFIG_TOPOLOGY_ID,
+    ) -> i32;
+    fn DisplayConfigGetDeviceInfo(request: *mut DISPLAYCONFIG_DEVICE_INFO_HEADER) -> i32;
+}
+
+const ERROR_INSUFFICIENT_BUFFER: i32 = 122;
+
+/// The current refresh rate of `monitor`: the exact rate of its display
+/// path, or else the whole hertz of its display mode.
+unsafe fn monitor_refresh_rate(monitor: HMONITOR) -> Option<f64> {
+    let mut info: MONITORINFOEXW = std::mem::zeroed();
+    info.cbSize = std::mem::size_of::<MONITORINFOEXW>() as DWORD;
+    if GetMonitorInfoW(monitor, &mut info as *mut MONITORINFOEXW as LPMONITORINFO) == 0 {
+        return None;
+    }
+    display_path_refresh_rate(&info.szDevice).or_else(|| display_mode_refresh_rate(&info.szDevice))
+}
+
+/// The refresh rate of the first active display path whose source is the
+/// GDI device `device`, such as 59.94 for a mode that whole hertz call 59.
+unsafe fn display_path_refresh_rate(device: &[u16]) -> Option<f64> {
+    active_display_paths()?.iter().find_map(|path| {
+        let mut source: DISPLAYCONFIG_SOURCE_DEVICE_NAME = std::mem::zeroed();
+        source.header._type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        source.header.size = std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32;
+        source.header.adapterId = path.sourceInfo.adapterId;
+        source.header.id = path.sourceInfo.id;
+        if DisplayConfigGetDeviceInfo(&mut source.header) != 0
+            || until_nul(&source.viewGdiDeviceName) != until_nul(device)
+        {
+            return None;
+        }
+        let rate = path.targetInfo.refreshRate;
+        (rate.Numerator > 0 && rate.Denominator > 0)
+            .then(|| rate.Numerator as f64 / rate.Denominator as f64)
+    })
+}
+
+unsafe fn active_display_paths() -> Option<Vec<DISPLAYCONFIG_PATH_INFO>> {
+    // The configuration can change between sizing the buffers and the query.
+    for _ in 0..3 {
+        let mut path_count = 0;
+        let mut mode_count = 0;
+        if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count) != 0
+        {
+            return None;
+        }
+        let mut paths = vec![std::mem::zeroed::<DISPLAYCONFIG_PATH_INFO>(); path_count as usize];
+        let mut modes = vec![std::mem::zeroed::<DISPLAYCONFIG_MODE_INFO>(); mode_count as usize];
+        match QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut path_count,
+            paths.as_mut_ptr(),
+            &mut mode_count,
+            modes.as_mut_ptr(),
+            std::ptr::null_mut(),
+        ) {
+            0 => {
+                paths.truncate(path_count as usize);
+                return Some(paths);
+            }
+            ERROR_INSUFFICIENT_BUFFER => {}
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// The refresh rate of `device`'s current display mode in whole hertz, or
+/// `None` when it can't be read or the driver reports 0 or 1, which stand
+/// for the hardware's default rate.
+unsafe fn display_mode_refresh_rate(device: &[u16]) -> Option<f64> {
+    let mut mode: DEVMODEW = std::mem::zeroed();
+    mode.dmSize = std::mem::size_of::<DEVMODEW>() as WORD;
+    if EnumDisplaySettingsW(device.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode) == 0 {
+        return None;
+    }
+    (mode.dmDisplayFrequency > 1).then_some(mode.dmDisplayFrequency as f64)
+}
+
+fn until_nul(wide: &[u16]) -> &[u16] {
+    &wide[..wide.iter().position(|&c| c == 0).unwrap_or(wide.len())]
 }
 
 pub fn run<F>(conf: &Conf, f: F)
@@ -1200,6 +1313,8 @@ where
             event_handler: None,
             modal_resizing_timer: 0,
             update_requested: true,
+            swap_interval_ext: None,
+            monitor: std::ptr::null_mut(),
         };
         display.init_dpi(conf.high_dpi);
 
@@ -1220,6 +1335,7 @@ where
             conf.sample_count,
             conf.platform.swap_interval.unwrap_or(1),
         );
+        display.swap_interval_ext = wgl.swap_interval_ext();
 
         super::gl::load_gl_funcs(|proc| display.get_proc_address(proc));
 
