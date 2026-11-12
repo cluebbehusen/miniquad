@@ -254,14 +254,31 @@ pub struct CVTime {
     pub time_value: i64,
     pub time_scale: i32,
     pub flags: i32,
-    pub epoch: i64,
 }
+
+#[cfg(target_os = "macos")]
+const _: () = assert!(std::mem::size_of::<CVTime>() == 16);
 
 #[cfg(target_os = "macos")]
 pub type CVDisplayLinkRef = *mut c_void;
 
 #[cfg(target_os = "macos")]
 pub type CVOptionFlags = u64;
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CVSMPTETime {
+    pub subframes: i16,
+    pub subframe_divisor: i16,
+    pub counter: u32,
+    pub type_: u32,
+    pub flags: u32,
+    pub hours: i16,
+    pub minutes: i16,
+    pub seconds: i16,
+    pub frames: i16,
+}
 
 #[cfg(target_os = "macos")]
 #[repr(C)]
@@ -273,10 +290,15 @@ pub struct CVTimeStamp {
     pub host_time: u64,
     pub rate_scalar: f64,
     pub video_refresh_period: i64,
-    pub smpte_time: i64,
+    pub smpte_time: CVSMPTETime,
     pub flags: u64,
     pub reserved: u64,
 }
+
+#[cfg(target_os = "macos")]
+const _: () = assert!(std::mem::size_of::<CVSMPTETime>() == 24);
+#[cfg(target_os = "macos")]
+const _: () = assert!(std::mem::size_of::<CVTimeStamp>() == 80);
 
 #[cfg(target_os = "macos")]
 pub type CVDisplayLinkOutputCallback = extern "C" fn(
