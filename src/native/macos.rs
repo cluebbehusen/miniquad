@@ -16,8 +16,9 @@ use {
         collections::HashMap,
         os::raw::c_void,
         sync::{
-            Condvar, Mutex,
+            atomic::{AtomicU64, Ordering},
             mpsc::Receiver,
+            Condvar, Mutex,
         },
         time::{Duration, Instant},
     },
@@ -45,6 +46,8 @@ pub struct MacosDisplay {
     native_requests: Receiver<Request>,
     update_requested: bool,
     last_paint_start_time: Instant,
+    frame_pacer: Option<FramePacer>,
+    frame_interval: u32,
 }
 
 impl MacosDisplay {
@@ -262,9 +265,7 @@ impl MacosDisplay {
             ShowKeyboard(..) => {
                 // Not applicable on macOS desktop
             }
-            SetPreferredFrameRate(..) => {
-                // Frame rate control not implemented for macOS yet
-            }
+            SetFrameInterval(interval) => self.frame_interval = interval,
             SetKeyboardType(..) => {
                 // Not applicable on macOS desktop
             }
@@ -425,6 +426,9 @@ pub fn define_cocoa_window_delegate() -> *const Class {
 
     extern "C" fn window_did_change_screen(this: &Object, _: Sel, _: ObjcId) {
         let payload = get_window_payload(this);
+        if let Some(frame_pacer) = payload.frame_pacer.as_ref() {
+            frame_pacer.follow_window(payload.window);
+        }
         if let Some((w, h)) = unsafe { payload.update_dimensions() } {
             if let Some(event_handler) = payload.context() {
                 event_handler.resize_event(w as _, h as _);
@@ -1084,13 +1088,23 @@ impl crate::native::Clipboard for MacosClipboard {
 }
 
 struct FrameSignal {
-    frame_ready: Mutex<bool>,
+    refreshes: Mutex<Refreshes>,
     cond: Condvar,
+    /// The display's refresh rate in hertz, as `f64` bits; 0 while unknown.
+    refresh_rate: AtomicU64,
+}
+
+#[derive(Default)]
+struct Refreshes {
+    /// Display link callbacks so far.
+    count: u64,
+    /// The count the waiting main loop wakes at.
+    wake_at: u64,
 }
 
 extern "C" fn display_link_frame_ready_callback(
     _display_link: CVDisplayLinkRef,
-    _now: *const CVTimeStamp,
+    now: *const CVTimeStamp,
     _output_time: *const CVTimeStamp,
     _flags_in: CVOptionFlags,
     _flags_out: *mut CVOptionFlags,
@@ -1098,9 +1112,19 @@ extern "C" fn display_link_frame_ready_callback(
 ) -> i32 {
     unsafe {
         let frame_signal = &*(display_link_context as *const FrameSignal);
-        if let Ok(mut frame_ready) = frame_signal.frame_ready.lock() {
-            *frame_ready = true;
-            frame_signal.cond.notify_one();
+        if let Some(now) = now.as_ref() {
+            if now.video_time_scale > 0 && now.video_refresh_period > 0 {
+                let hz = now.video_time_scale as f64 / now.video_refresh_period as f64;
+                frame_signal
+                    .refresh_rate
+                    .store(hz.to_bits(), Ordering::Relaxed);
+            }
+        }
+        if let Ok(mut refreshes) = frame_signal.refreshes.lock() {
+            refreshes.count += 1;
+            if refreshes.count == refreshes.wake_at {
+                frame_signal.cond.notify_one();
+            }
         }
     }
     0
@@ -1109,10 +1133,12 @@ extern "C" fn display_link_frame_ready_callback(
 struct FramePacer {
     display_link: CVDisplayLinkRef,
     frame_signal: Box<FrameSignal>,
+    /// The refresh count the last wait returned at.
+    last: u64,
 }
 
 impl FramePacer {
-    fn new() -> Option<Self> {
+    fn new(window: ObjcId) -> Option<Self> {
         unsafe {
             let mut display_link: CVDisplayLinkRef = std::ptr::null_mut();
             if CVDisplayLinkCreateWithActiveCGDisplays(&mut display_link as *mut _) != 0
@@ -1122,8 +1148,9 @@ impl FramePacer {
             }
 
             let frame_signal = Box::new(FrameSignal {
-                frame_ready: Mutex::new(false),
+                refreshes: Mutex::new(Refreshes::default()),
                 cond: Condvar::new(),
+                refresh_rate: AtomicU64::new(0),
             });
 
             if CVDisplayLinkSetOutputCallback(
@@ -1136,30 +1163,62 @@ impl FramePacer {
                 return None;
             }
 
+            let pacer = Self {
+                display_link,
+                frame_signal,
+                last: 0,
+            };
+            pacer.follow_window(window);
+
             if CVDisplayLinkStart(display_link) != 0 {
-                CVDisplayLinkRelease(display_link);
                 return None;
             }
 
-            Some(Self {
-                display_link,
-                frame_signal,
-            })
+            Some(pacer)
         }
     }
 
-    fn wait_next_frame(&self, timeout: Duration) {
-        let mut frame_ready = self.frame_signal.frame_ready.lock().unwrap();
-        if *frame_ready {
-            *frame_ready = false;
-            return;
+    /// Moves the link onto the display `window` is on. A link created for
+    /// the active displays otherwise keeps the first display's timing.
+    fn follow_window(&self, window: ObjcId) {
+        unsafe {
+            let screen: ObjcId = msg_send![window, screen];
+            if screen.is_null() {
+                return;
+            }
+            let description: ObjcId = msg_send![screen, deviceDescription];
+            let number: ObjcId =
+                msg_send![description, objectForKey: str_to_nsstring("NSScreenNumber")];
+            if number.is_null() {
+                return;
+            }
+            let display_id: u32 = msg_send![number, unsignedIntValue];
+            let _ = CVDisplayLinkSetCurrentCGDisplay(self.display_link, display_id);
         }
+    }
 
-        let (mut frame_ready, _) = self.frame_signal.cond.wait_timeout(frame_ready, timeout).unwrap();
-
-        if *frame_ready {
-            *frame_ready = false;
+    /// Waits until `interval` refreshes have passed since the last wait
+    /// returned, or for `timeout` per refresh if the link stalls.
+    fn wait_next_frame(&mut self, interval: u32, timeout: Duration) {
+        let target = self.last + u64::from(interval);
+        let mut refreshes = self.frame_signal.refreshes.lock().unwrap();
+        if refreshes.count < target {
+            refreshes.wake_at = target;
+            refreshes = self
+                .frame_signal
+                .cond
+                .wait_timeout_while(refreshes, timeout * interval, |refreshes| {
+                    refreshes.count < target
+                })
+                .unwrap()
+                .0;
         }
+        self.last = refreshes.count;
+    }
+
+    fn refresh_rate(&self) -> Option<f64> {
+        let hz = f64::from_bits(self.frame_signal.refresh_rate.load(Ordering::Relaxed));
+        (hz > 0.).then_some(hz)
     }
 }
 
@@ -1340,6 +1399,8 @@ where
         modifiers: Modifiers::default(),
         update_requested: true,
         last_paint_start_time: Instant::now(),
+        frame_pacer: None,
+        frame_interval: 1,
     };
 
     let app_delegate_class = define_app_delegate();
@@ -1464,17 +1525,15 @@ where
     // Basically reimplementing msg_send![ns_app, run] here
     let distant_future: ObjcId = msg_send![class!(NSDate), distantFuture];
     let distant_past: ObjcId = msg_send![class!(NSDate), distantPast];
-    let frame_pacer = if conf.platform.blocking_event_loop {
-        None
-    } else {
-        FramePacer::new()
-    };
+    if !conf.platform.blocking_event_loop {
+        display.frame_pacer = FramePacer::new(window);
+    }
     let mut done = false;
     while !(done || crate::native_display().lock().unwrap().quit_ordered) {
 
         // Wait at the top for just in time rendering
-        if let Some(frame_pacer) = frame_pacer.as_ref() {
-            frame_pacer.wait_next_frame(Duration::from_millis(50));
+        if let Some(frame_pacer) = display.frame_pacer.as_mut() {
+            frame_pacer.wait_next_frame(display.frame_interval, Duration::from_millis(50));
         }
 
         while let Ok(request) = display.native_requests.try_recv() {
@@ -1482,7 +1541,11 @@ where
         }
 
         {
-            let d = native_display().lock().unwrap();
+            let mut d = native_display().lock().unwrap();
+            d.refresh_rate = display
+                .frame_pacer
+                .as_ref()
+                .and_then(FramePacer::refresh_rate);
             if d.quit_requested || d.quit_ordered {
                 done = true;
             }

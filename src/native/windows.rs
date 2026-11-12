@@ -1140,8 +1140,8 @@ impl WindowsDisplay {
                     IME_USER_DISABLED.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }
-            SetPreferredFrameRate(..) => {
-                // Frame rate control not implemented for Windows yet
+            SetFrameInterval(..) => {
+                // Frame pacing not implemented for Windows yet
             }
             SetKeyboardType(..) => {
                 // Onscreen keyboard layout not implemented for Windows yet

@@ -322,10 +322,34 @@ extern "C" {
         callback: CVDisplayLinkOutputCallback,
         user_info: *mut c_void,
     ) -> i32;
+    pub fn CVDisplayLinkSetCurrentCGDisplay(display_link: CVDisplayLinkRef, display_id: u32)
+        -> i32;
     pub fn CVDisplayLinkStart(display_link: CVDisplayLinkRef) -> i32;
     pub fn CVDisplayLinkStop(display_link: CVDisplayLinkRef) -> i32;
     pub fn CVDisplayLinkRelease(display_link: CVDisplayLinkRef);
     pub fn CVDisplayLinkGetNominalOutputVideoRefreshPeriod(display_link: CVDisplayLinkRef) -> CVTime;
+}
+
+#[cfg(any(target_os = "ios", target_os = "tvos"))]
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CAFrameRateRange {
+    pub minimum: f32,
+    pub maximum: f32,
+    pub preferred: f32,
+}
+
+#[cfg(any(target_os = "ios", target_os = "tvos"))]
+unsafe impl Encode for CAFrameRateRange {
+    fn encode() -> Encoding {
+        let encoding = format!(
+            "{{CAFrameRateRange={}{}{}}}",
+            f32::encode().as_str(),
+            f32::encode().as_str(),
+            f32::encode().as_str()
+        );
+        unsafe { Encoding::from_str(&encoding) }
+    }
 }
 
 // Foundation

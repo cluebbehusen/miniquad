@@ -71,6 +71,9 @@ struct IosDisplay {
     requests_rx: mpsc::Receiver<crate::native::Request>,
     blocking_event_loop: bool,
     held: Option<HeldKey>,
+    frame_interval: u32,
+    /// The screen maximum the current pacing was set from; 0 before any.
+    max_fps: isize,
 }
 
 /// UIKit sends no repeats for raw key presses, so a held key repeats on
@@ -170,20 +173,43 @@ impl IosDisplay {
         }
     }
 
-    fn set_preferred_frame_rate(&mut self, frames_per_second: Option<u32>) {
+    fn set_frame_interval(&mut self, interval: u32) {
+        self.frame_interval = interval;
+        self.apply_pacing();
+    }
+
+    /// Re-reads the maximum of the screen showing the view, which changes
+    /// when the window moves to another screen or a TV switches modes,
+    /// and re-paces on a change.
+    fn follow_screen(&mut self) {
+        let max_fps = max_frames_per_second(self.view);
+        if max_fps == self.max_fps {
+            return;
+        }
+        self.max_fps = max_fps;
+        native_display().lock().unwrap().refresh_rate = (max_fps > 0).then_some(max_fps as f64);
+        self.apply_pacing();
+    }
+
+    fn apply_pacing(&self) {
+        if self.max_fps <= 0 {
+            return;
+        }
+        let rate = self.max_fps as f32 / self.frame_interval as f32;
         unsafe {
-            let frames_per_second: isize = match frames_per_second {
-                Some(frames_per_second) => frames_per_second as isize,
-                None => {
-                    let main_screen: ObjcId = msg_send![class!(UIScreen), mainScreen];
-                    msg_send![main_screen, maximumFramesPerSecond]
+            match self.gfx_api {
+                AppleGfxApi::OpenGl => {
+                    let range = CAFrameRateRange {
+                        minimum: rate,
+                        maximum: rate,
+                        preferred: rate,
+                    };
+                    msg_send_![self.display_link, setPreferredFrameRateRange: range];
                 }
-            };
-            let paced = match self.gfx_api {
-                AppleGfxApi::OpenGl => self.display_link,
-                AppleGfxApi::Metal => self.view,
-            };
-            msg_send_![paced, setPreferredFramesPerSecond: frames_per_second];
+                AppleGfxApi::Metal => {
+                    msg_send_![self.view, setPreferredFramesPerSecond: rate.round() as isize];
+                }
+            }
         }
     }
 
@@ -217,6 +243,25 @@ impl IosDisplay {
         }
 
         self.event_handler = Some(f());
+    }
+}
+
+/// The most frames per second the screen showing `view` can display: the
+/// window scene's screen, or the main screen before the view has a window.
+fn max_frames_per_second(view: ObjcId) -> isize {
+    unsafe {
+        let window: ObjcId = msg_send![view, window];
+        let mut screen = nil;
+        if !window.is_null() {
+            let scene: ObjcId = msg_send![window, windowScene];
+            if !scene.is_null() {
+                screen = msg_send![scene, screen];
+            }
+        }
+        if screen.is_null() {
+            screen = msg_send![class!(UIScreen), mainScreen];
+        }
+        msg_send![screen, maximumFramesPerSecond]
     }
 }
 
@@ -954,8 +999,8 @@ fn process_events(payload: &mut IosDisplay) -> bool {
     while let Ok(request) = payload.requests_rx.try_recv() {
         match request {
             crate::native::Request::ShowKeyboard(show) => payload.show_keyboard(show),
-            crate::native::Request::SetPreferredFrameRate(frames_per_second) => {
-                payload.set_preferred_frame_rate(frames_per_second)
+            crate::native::Request::SetFrameInterval(interval) => {
+                payload.set_frame_interval(interval)
             }
             crate::native::Request::SetKeyboardType(keyboard_type) => {
                 payload.set_keyboard_type(keyboard_type)
@@ -1024,6 +1069,7 @@ pub fn define_glk_or_mtk_view_dlg(superclass: &Class) -> *const Class {
 
     extern "C" fn draw_in_mtk_view(this: &Object, _: Sel, _: ObjcId) {
         let payload = get_window_payload(this);
+        payload.follow_screen();
         if payload.event_handler.is_none() {
             payload.init_event_handler();
         }
@@ -1042,6 +1088,7 @@ pub fn define_glk_or_mtk_view_dlg(superclass: &Class) -> *const Class {
         if window.is_null() {
             return;
         }
+        payload.follow_screen();
         if payload.event_handler.is_none() || process_events(payload) {
             unsafe { msg_send_![payload.view, display] };
         }
@@ -1227,7 +1274,6 @@ unsafe fn create_metal_view(screen_rect: NSRect, sample_count: i32, _high_dpi: b
     // the main thread at `preferredFramesPerSecond`.
     msg_send_![mtk_view_obj, setEnableSetNeedsDisplay: NO];
     msg_send_![mtk_view_obj, setPaused: NO];
-    msg_send_![mtk_view_obj, setPreferredFramesPerSecond:60];
     msg_send_![mtk_view_obj, setDelegate: mtk_view_dlg_obj];
     let device = MTLCreateSystemDefaultDevice();
     msg_send_![mtk_view_obj, setDevice: device];
@@ -1365,19 +1411,16 @@ pub fn define_app_delegate() -> *const Class {
                 },
             }));
 
-            // GLKView has no display link of its own, so OpenGL gets one
-            // at MTKView's default 60 fps.
+            // GLKView has no display link of its own, so OpenGL gets one.
             let display_link: ObjcId = if conf.platform.apple_gfx_api == AppleGfxApi::OpenGl {
-                let display_link: ObjcId = msg_send![class!(CADisplayLink),
+                msg_send![class!(CADisplayLink),
                     displayLinkWithTarget: view.view_dlg
-                    selector: sel!(displayLinkFired:)];
-                msg_send_![display_link, setPreferredFramesPerSecond: 60isize];
-                display_link
+                    selector: sel!(displayLinkFired:)]
             } else {
                 nil
             };
 
-            let payload = Box::new(IosDisplay {
+            let mut payload = Box::new(IosDisplay {
                 view: view.view,
                 view_ctrl: view.view_ctrl,
                 display_link,
@@ -1393,7 +1436,10 @@ pub fn define_app_delegate() -> *const Class {
                 requests_rx,
                 blocking_event_loop: conf.platform.blocking_event_loop,
                 held: None,
+                frame_interval: 1,
+                max_fps: 0,
             });
+            payload.follow_screen();
             let payload_ptr = Box::into_raw(payload) as *mut std::ffi::c_void;
 
             (*view.view).set_ivar("display_ptr", payload_ptr);
