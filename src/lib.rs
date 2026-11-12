@@ -421,7 +421,7 @@ pub mod window {
     /// The refresh rate, in hertz, of the display the window is on, or
     /// `None` where it is unknown. It can change while the app runs, as
     /// when the window moves to another display or the display changes
-    /// mode. Reported on macOS, iOS, tvOS and Windows.
+    /// mode. Reported on macOS, iOS, tvOS, Windows and Linux on X11.
     pub fn refresh_rate() -> Option<f64> {
         let d = native_display().lock().unwrap();
         d.refresh_rate
@@ -430,10 +430,11 @@ pub mod window {
     /// Present a frame on every `interval`th refresh of the display the
     /// window is on: 1 draws on every refresh, 2 on every other one, and
     /// so on. 0 counts as 1. Pacing follows the display's own refresh, so
-    /// frames stay evenly spaced. Takes effect on macOS, iOS, tvOS and
-    /// Windows, and does nothing elsewhere. On Windows it sets the OpenGL
-    /// swap interval, which a driver setting can override. iPhones also need
-    /// `CADisableMinimumFrameDurationOnPhone` in Info.plist to go above 60.
+    /// frames stay evenly spaced. Takes effect on macOS, iOS, tvOS, Windows
+    /// and Linux on X11, and does nothing elsewhere. On Windows and X11 it
+    /// sets the OpenGL swap interval, which a driver setting can override.
+    /// iPhones also need `CADisableMinimumFrameDurationOnPhone` in
+    /// Info.plist to go above 60.
     pub fn set_frame_interval(interval: u32) {
         let interval = interval.max(1);
         let d = native_display().lock().unwrap();
