@@ -62,7 +62,7 @@ type GetPixelFormatAttribivARB =
 type GetExtensionsStringEXT = extern "system" fn() -> *const i8;
 type GetExtensionsStringARB = extern "system" fn(_: HDC) -> *const i8;
 type CreateContextAttribsARB = extern "system" fn(_: HDC, _: HGLRC, _: *const INT) -> HGLRC;
-type SwapIntervalEXT = extern "system" fn(_: INT) -> bool;
+pub(crate) type SwapIntervalEXT = extern "system" fn(_: INT) -> bool;
 
 #[derive(Copy, Clone)]
 pub struct GlFbconfig {
@@ -295,6 +295,11 @@ impl Wgl {
         }
     }
 
+    /// `wglSwapIntervalEXT`, when the driver has WGL_EXT_swap_control.
+    pub(crate) fn swap_interval_ext(&self) -> Option<SwapIntervalEXT> {
+        self.SwapIntervalEXT.filter(|_| self.ext_swap_control)
+    }
+
     unsafe fn wgl_attrib(
         &self,
         display: &mut WindowsDisplay,
@@ -459,9 +464,9 @@ impl Wgl {
             }
         }
         (display.libopengl32.wglMakeCurrent)(display.dc, gl_ctx);
-        if self.ext_swap_control {
+        if let Some(swap_interval_ext) = self.swap_interval_ext() {
             /* FIXME: DwmIsCompositionEnabled() (see GLFW) */
-            (self.SwapIntervalEXT.unwrap())(swap_interval);
+            swap_interval_ext(swap_interval);
         }
 
         gl_ctx

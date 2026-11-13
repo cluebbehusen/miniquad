@@ -8,6 +8,7 @@ pub mod libx11;
 mod libx11_ex;
 mod x_cursor;
 mod xi_input;
+mod xrandr;
 
 use crate::{
     event::EventHandler,
@@ -43,6 +44,7 @@ pub struct X11Display {
     libx11: LibX11,
     libxkbcommon: LibXkbCommon,
     libxi: xi_input::LibXi,
+    xrandr: Option<xrandr::Xrandr>,
     display: *mut Display,
     root: Window,
     window: Window,
@@ -150,6 +152,9 @@ impl X11Display {
                 event_handler.window_minimized_event();
             }
             22 => {
+                if let Some(xrandr) = &mut self.xrandr {
+                    xrandr.window_moved();
+                }
                 let mut d = crate::native_display().try_lock().unwrap();
                 let left = event.xconfigure.x;
                 let top = event.xconfigure.y;
@@ -249,7 +254,11 @@ impl X11Display {
                     event_handler.raw_mouse_motion(dx as f32, dy as f32);
                 }
             }
-            _ => {}
+            event_type => {
+                if let Some(xrandr) = &mut self.xrandr {
+                    xrandr.handle_event(event_type);
+                }
+            }
         };
 
         let d = crate::native_display().try_lock().unwrap();
@@ -406,6 +415,12 @@ impl X11Display {
         (libx11.XDefineCursor)(display, window, cursor);
     }
 
+    unsafe fn update_refresh_rate(&mut self) {
+        if let Some(xrandr) = &mut self.xrandr {
+            xrandr.update(&mut self.libx11, self.display, self.root, self.window);
+        }
+    }
+
     fn process_request(&mut self, request: Request) {
         use Request::*;
         unsafe {
@@ -434,7 +449,8 @@ impl X11Display {
                     eprintln!("Not implemented for X11")
                 }
                 SetFrameInterval(..) => {
-                    // Frame pacing not implemented for X11 yet
+                    // The GLX and EGL loops set the swap interval, since
+                    // their context must be current.
                 }
                 SetKeyboardType(..) => {
                     // No onscreen keyboard on X11
@@ -508,7 +524,16 @@ where
 
     while !crate::native_display().try_lock().unwrap().quit_ordered {
         while let Ok(request) = rx.try_recv() {
-            display.process_request(request);
+            if let Request::SetFrameInterval(interval) = request {
+                glx.swap_interval(
+                    display.display,
+                    glx_window,
+                    glx_context,
+                    interval.min(i32::MAX as u32) as i32,
+                );
+            } else {
+                display.process_request(request);
+            }
         }
         glx.make_current(display.display, glx_window, glx_context);
 
@@ -527,6 +552,7 @@ where
             (display.libx11.XNextEvent)(display.display, &mut xevent);
             display.process_event(&mut xevent, &mut *event_handler);
         }
+        display.update_refresh_rate();
 
         if !conf.platform.blocking_event_loop || display.update_requested {
             display.update_requested = false;
@@ -620,7 +646,14 @@ where
 
     while !crate::native_display().try_lock().unwrap().quit_ordered {
         while let Ok(request) = rx.try_recv() {
-            display.process_request(request);
+            if let Request::SetFrameInterval(interval) = request {
+                let interval = interval.min(i32::MAX as u32) as i32;
+                if (egl_lib.eglSwapInterval)(egl_display, interval) == 0 {
+                    eprintln!("eglSwapInterval failed");
+                }
+            } else {
+                display.process_request(request);
+            }
         }
 
         let mut count = (display.libx11.XPending)(display.display);
@@ -634,6 +667,7 @@ where
             (display.libx11.XNextEvent)(display.display, &mut xevent);
             display.process_event(&mut xevent, &mut *event_handler);
         }
+        display.update_refresh_rate();
 
         if !conf.platform.blocking_event_loop || display.update_requested {
             display.update_requested = false;
@@ -687,6 +721,7 @@ where
         (libx11.XkbSetDetectableAutoRepeat)(x11_display, true as _, std::ptr::null_mut());
 
         libx11.load_extensions(x11_display);
+        let xrandr = xrandr::Xrandr::new(x11_display, x11_root);
         let mut display = X11Display {
             empty_cursor: x_cursor::create_empty_cursor(x11_display, x11_root, &mut libx11),
             display: x11_display,
@@ -695,6 +730,7 @@ where
             libx11,
             libxkbcommon,
             libxi,
+            xrandr,
             repeated_keycodes: [false; 256],
             cursor_cache: HashMap::new(),
             update_requested: true,

@@ -903,6 +903,7 @@ crate::declare_module!(
     pub fn XRaiseWindow(*mut Display, Window) -> c_int,
     pub fn XResizeWindow(*mut Display, Window, c_int, c_int) -> c_int,
     pub fn XMoveWindow(*mut Display, Window, c_int, c_int) -> c_int,
+    pub fn XTranslateCoordinates(*mut Display, Window, Window, c_int, c_int, *mut c_int, *mut c_int, *mut Window) -> c_int,
     pub fn XPending(*mut Display) -> c_int,
     pub fn XNextEvent(*mut Display, *mut XEvent) -> c_int,
     pub fn XGetKeyboardMapping(*mut Display, KeyCode, c_int, *mut c_int) -> *mut KeySym,
