@@ -433,8 +433,8 @@ impl X11Display {
                 ShowKeyboard(..) => {
                     eprintln!("Not implemented for X11")
                 }
-                SetPreferredFrameRate(..) => {
-                    // Frame rate control not implemented for X11 yet
+                SetFrameInterval(..) => {
+                    // Frame pacing not implemented for X11 yet
                 }
                 SetKeyboardType(..) => {
                     // No onscreen keyboard on X11

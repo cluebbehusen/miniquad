@@ -23,6 +23,7 @@ pub(crate) struct NativeDisplayData {
     pub clipboard: Box<dyn Clipboard>,
     pub dropped_files: DroppedFiles,
     pub blocking_event_loop: bool,
+    pub refresh_rate: Option<f64>,
 
     #[cfg(target_vendor = "apple")]
     pub view: crate::native::apple::frameworks::ObjcId,
@@ -56,6 +57,7 @@ impl NativeDisplayData {
             clipboard,
             dropped_files: Default::default(),
             blocking_event_loop: false,
+            refresh_rate: None,
             #[cfg(target_vendor = "apple")]
             gfx_api: crate::conf::AppleGfxApi::OpenGl,
             #[cfg(target_vendor = "apple")]
@@ -76,7 +78,7 @@ pub(crate) enum Request {
     SetWindowPosition { new_x: u32, new_y: u32 },
     SetFullscreen(bool),
     ShowKeyboard(bool),
-    SetPreferredFrameRate(Option<u32>),
+    SetFrameInterval(u32),
     SetKeyboardType(crate::KeyboardType),
     SetImePosition { x: i32, y: i32 },
     SetImeEnabled(bool),

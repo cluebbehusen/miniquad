@@ -418,21 +418,33 @@ pub mod window {
             .unwrap();
     }
 
-    /// Set how many frames per second to aim for, or `None` for the
-    /// display's maximum. The platform may not hit the rate exactly.
-    /// Only works on iOS right now; iPhones also need
+    /// The refresh rate, in hertz, of the display the window is on, or
+    /// `None` where it is unknown. It can change while the app runs, as
+    /// when the window moves to another display or the display changes
+    /// mode. Reported on macOS, iOS and tvOS.
+    pub fn refresh_rate() -> Option<f64> {
+        let d = native_display().lock().unwrap();
+        d.refresh_rate
+    }
+
+    /// Present a frame on every `interval`th refresh of the display the
+    /// window is on: 1 draws on every refresh, 2 on every other one, and
+    /// so on. 0 counts as 1. Pacing follows the display's own refresh, so
+    /// frames stay evenly spaced. Takes effect on macOS, iOS and tvOS, and
+    /// does nothing elsewhere. iPhones also need
     /// `CADisableMinimumFrameDurationOnPhone` in Info.plist to go above 60.
-    pub fn set_preferred_frame_rate(frames_per_second: Option<u32>) {
+    pub fn set_frame_interval(interval: u32) {
+        let interval = interval.max(1);
         let d = native_display().lock().unwrap();
         #[cfg(target_os = "android")]
         {
-            let _ = frames_per_second;
+            (d.native_requests)(native::Request::SetFrameInterval(interval));
         }
 
         #[cfg(not(target_os = "android"))]
         {
             d.native_requests
-                .send(native::Request::SetPreferredFrameRate(frames_per_second))
+                .send(native::Request::SetFrameInterval(interval))
                 .unwrap();
         }
     }
