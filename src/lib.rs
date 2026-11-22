@@ -421,7 +421,8 @@ pub mod window {
     /// The refresh rate, in hertz, of the display the window is on, or
     /// `None` where it is unknown. It can change while the app runs, as
     /// when the window moves to another display or the display changes
-    /// mode. Reported on macOS, iOS, tvOS, Windows and Linux on X11.
+    /// mode. Reported on macOS, iOS, tvOS, Windows and Linux on X11 outside
+    /// gamescope.
     pub fn refresh_rate() -> Option<f64> {
         let d = native_display().lock().unwrap();
         d.refresh_rate
