@@ -1,6 +1,6 @@
 //! The refresh rate of the CRTC showing most of the window, read through
-//! XRandR. The library is loaded at runtime; without it, or without the
-//! server extension, the refresh rate stays unknown.
+//! XRandR. The library is loaded at runtime; without it, without the
+//! server extension, or under gamescope, the refresh rate stays unknown.
 
 #![allow(non_upper_case_globals, non_snake_case)]
 
@@ -125,10 +125,16 @@ pub struct Xrandr {
 
 impl Xrandr {
     /// Loads XRandR and selects its screen, CRTC and output change events
-    /// on `root`. Returns `None` without the library or a 1.3 server
-    /// extension, which `XRRGetScreenResourcesCurrent` needs to avoid
-    /// probing the outputs.
+    /// on `root`. Returns `None` under gamescope, and without the library or
+    /// a 1.3 server extension, which `XRRGetScreenResourcesCurrent` needs to
+    /// avoid probing the outputs.
     pub unsafe fn new(display: *mut Display, root: Window) -> Option<Xrandr> {
+        // Gamescope gives each game its own Xwayland, whose mode keeps the
+        // refresh gamescope started with while the panel runs at another,
+        // as on a Steam Deck whose refresh slider has moved.
+        if std::env::var_os("GAMESCOPE_WAYLAND_DISPLAY").is_some() {
+            return None;
+        }
         let lib = LibXrandr::try_load().ok()?;
         // The first query hands Xlib hooks into libXrandr, even when the
         // server lacks the extension, and Xlib calls them as late as
